@@ -70,11 +70,11 @@ def encrypt_sym(key, message):
     return: returns base64 coded encrypted str
     rtype: str
     """
-    if type(message) != str and type(message) != bytes:
+    if type(message) is not str and type(message) is not bytes:
         message = "{}".format(message)
-    if type(message) == str:
+    if type(message) is str:
         message = message.encode("utf-8")
-    if not type(message) == bytes:
+    if not type(message) is bytes:
         raise TypeError
     sym_hasher = nacl.hash.sha256
     key_bytes = sym_hasher(key.encode("utf-8"), encoder=nacl.encoding.RawEncoder)
@@ -128,26 +128,26 @@ def message_verify(public_key, message):
 
 
 def to_base64(msg):
-    if type(msg) == str:
+    if type(msg) is str:
         return base64.b64encode(msg.encode('utf-8'))
-    if type(msg) == bytes:
+    if type(msg) is bytes:
         return base64.b64encode(msg)
 
 
 def to_base64_str(msg):
-    if type(msg) == str:
+    if type(msg) is str:
         return base64.b64encode(msg.encode('utf-8')).decode('utf-8')
-    if type(msg) == bytes:
+    if type(msg) is bytes:
         return base64.b64encode(msg).decode('utf-8')
 
 
 def from_base64_byte(msg):
-    if type(msg) == str:
+    if type(msg) is str:
         return base64.b64decode(msg)
 
 
 def from_base64_str(msg):
-    if type(msg) == str:
+    if type(msg) is str:
         return base64.b64decode(msg).decode('utf-8')
 
 
@@ -198,9 +198,9 @@ def encrypt_asym(public_key, message):
     return: encrypted message
     rtype: str
     """
-    if type(message) == str:
+    if type(message) is str:
         message = message.encode("utf-8")
-    if not type(message) == bytes:
+    if not type(message) is bytes:
         raise TypeError
     encrypt_box = nacl.public.SealedBox(nacl.public.PublicKey(to_binary(public_key)))
     encrypted = encrypt_box.encrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
@@ -218,9 +218,9 @@ def decrypt_asym(private_key, message):
     return: decrypted message
     rtype: str
     """
-    if type(message) == str:
+    if type(message) is str:
         message = message.encode("utf-8")
-    if not type(message) == bytes:
+    if not type(message) is bytes:
         raise TypeError
     decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(to_binary(private_key)))
     decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
@@ -255,7 +255,7 @@ def newhope_keygen():
     return public_msg, private_key
 
 
-def newhope_sharedB(public_msg):
+def newhope_shared_b(public_msg):
     # warning for testing only - do not use it for production
     public_msg = (str_to_list_int(public_msg[0]), from_base64_byte(public_msg[1]))
     shared_key, public_msg = pynewhope.newhope.sharedB(public_msg)
@@ -265,7 +265,7 @@ def newhope_sharedB(public_msg):
     return public_msg, shared_key
 
 
-def newhope_sharedA(public_msg, private_key):
+def newhope_shared_a(public_msg, private_key):
     # warning for testing only - do not use it for production
     public_msg = (str_to_list_int(public_msg[0]), str_to_list_int(public_msg[1]))
     private_key = (str_to_list_int(private_key))
@@ -352,13 +352,13 @@ if __name__ == '__main__':
                                                                           len(public_msg[1]), public_msg))
     print("new hope types - public_msg: ({}, {}) -> {}".format(type(public_msg[0]),
                                                                type(public_msg[1]), type(public_msg)))
-    public_msg_2, shared_key = newhope_sharedB(list(public_msg))
+    public_msg_2, shared_key = newhope_shared_b(list(public_msg))
     print("new hope - len public msg 2: ({}, {}) and public msg: {}".format(len(public_msg_2[0]),
                                                                             len(public_msg_2[1]), public_msg_2))
     print("new hope types - public_msg 2: ({}, {}) -> {}".format(type(public_msg_2[0]),
                                                                  type(public_msg_2[1]), type(public_msg_2)))
 
-    shared_key_2 = newhope_sharedA(public_msg_2, private_key)
+    shared_key_2 = newhope_shared_a(public_msg_2, private_key)
     print("new hope shared_key 1: {} -> type {}".format(shared_key, type(shared_key)))
     print("new hope shared_key 2: {} -> type {}".format(shared_key_2, type(shared_key_2)))
 

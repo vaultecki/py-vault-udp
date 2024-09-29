@@ -210,7 +210,7 @@ class SymKeyExchange:
 
     def key_exchange_b(self, public_msg, addr):
         dprint("ske: Key-Exchange-B from {}".format(addr), self.debug)
-        public_msg_2, shared_key = vault_udp_socket_helper.newhope_sharedB(public_msg)
+        public_msg_2, shared_key = vault_udp_socket_helper.newhope_shared_b(public_msg)
         self.__update_key(addr, shared_key)
         return public_msg_2
 
@@ -229,7 +229,7 @@ class SymKeyExchange:
         if public_msg:
             dprint("ske: Key-Exchange-A from {}".format(addr), self.debug)
             self.__remove_key(addr)
-            shared_key = vault_udp_socket_helper.newhope_sharedA(public_msg, self.__private_key)
+            shared_key = vault_udp_socket_helper.newhope_shared_a(public_msg, self.__private_key)
             self.__update_key(addr, shared_key)
 
     def encrypt(self, text, addr):
@@ -531,7 +531,7 @@ class UDPSocketClass:
         param addr: addr to send to - None for to all known
         type addr: tuple ip and port
         """
-        if type(str_to_send) != str:
+        if type(str_to_send) is str:
             raise TypeError("expected str")
 
         data_2_send = {"data": str_to_send, "ign": ""}
