@@ -1,11 +1,6 @@
 Pillow>=9.2.0
-PyQt6>=6.4.2
 PyNaCl>=1.5.0
 PySignal>=1.1.1
-adbutils>=1.2.9
-pyserial>=3.5
-numpy>=1.23.3
-requests>=2.28.2
-zeroconf>=0.47.3
-noiseprotocol>=0.3.1
-watchdog>=3.0.0
+tinyec>=0.4.0
+PyNewHope>=0.33
+psutil>=6.0.0
