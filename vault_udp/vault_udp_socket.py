@@ -4,6 +4,7 @@ import vault_ip
 import json
 import math
 import nacl.exceptions
+import logging
 import random
 import socket
 import threading
@@ -11,25 +12,16 @@ import time
 import PySignal
 
 
-def dprint(text, debug=False):
-    """debug print - only prints if debug set to True
-    :param text: text to print
-    :type text: str
-    :param debug: true if it should print
-    :type debug: bool
-    """
-    if debug:
-        print(text)
+logger = logging.getLogger(__name__)
 
 
 class PubKeySignalEncryption:
     """public key encryption for use with udp class
     """
-    def __init__(self, private_key=None, lifetime=60, debug=False):
+    def __init__(self, private_key=None, lifetime=60):
         self.__keys = {}
         self.__keys_last_update = {}
         self.key_max_lifetime = lifetime
-        self.debug = debug
         self.run_clean_ups = True
         if private_key:
             self.__private_key = private_key
@@ -44,7 +36,7 @@ class PubKeySignalEncryption:
         :return: public key
         :rtype: str
         """
-        dprint("Generate new keys for asymmetric encryption")
+        logger.info("Generate new keys for asymmetric encryption")
         public_key, private_key = vault_udp_socket_helper.generate_keys_asym()
         self.set_private_key(private_key)
         return public_key
@@ -57,7 +49,7 @@ class PubKeySignalEncryption:
         return: public key
         rtype: str
         """
-        dprint("pkse: set private key: {}".format(private_key), self.debug)
+        logger.debug("pkse: set private key: {}".format(private_key))
         self.__private_key = private_key
         self.public_key = vault_udp_socket_helper.generate_public_key(self.__private_key)
         return self.public_key
@@ -71,7 +63,7 @@ class PubKeySignalEncryption:
         type key: str
         """
         if key:
-            dprint("pkse: update Key: {} for {}".format(key, addr), self.debug)
+            logger.debug("pkse: update Key: {} for {}".format(key, addr))
             self.__keys.update({tuple(addr): key})
             self.__keys_last_update.update({tuple(addr): math.floor(time.time())})
 
@@ -91,7 +83,7 @@ class PubKeySignalEncryption:
         :rtype: str
         """
         if tuple(addr) in self.__keys:
-            dprint("pkse: remove key for addr {}".format(addr), self.debug)
+            logger.info("pkse: remove key for addr {}".format(addr))
             self.__keys.pop(tuple(addr))
             self.__keys_last_update.pop(tuple(addr))
 
@@ -121,7 +113,7 @@ class PubKeySignalEncryption:
         return: text
         rtype: str
         """
-        dprint("pkse: recv {}: data {}".format(addr, data.replace("\n", "")), self.debug)
+        logger.debug("pkse: recv {}: data {}".format(addr, data.replace("\n", "")))
         if not self.__private_key:
             return data
 
@@ -132,9 +124,9 @@ class PubKeySignalEncryption:
         except nacl.exceptions.InvalidkeyError:
             text = data
         except Exception as e:
-            dprint("sym decryption error: {}".format(e), self.debug)
+            logger.debug("sym decryption error: {}".format(e))
             text = data
-        dprint("pkse: recv {}: text {}".format(addr, text.replace("\n", "")), self.debug)
+        logger.info("pkse: recv {}: text {}".format(addr, text.replace("\n", "")))
         return text
 
     def encrypt(self, data, addr):
@@ -148,22 +140,21 @@ class PubKeySignalEncryption:
         return: encrypted text
         rtype: str
         """
-        dprint("pkse: encrypt {}: str {}".format(addr, data.replace("\n", "")), self.debug)
+        logger.debug("pkse: encrypt {}: str {}".format(addr, data.replace("\n", "")))
         if not self.__keys.get(tuple(addr), False):
             return data
 
         text = vault_udp_socket_helper.encrypt_asym(self.__keys.get(tuple(addr)), data)
-        dprint("pkse: encrypted {}: str {}".format(addr, text.replace("\n", "")), self.debug)
+        logger.debug("pkse: encrypted {}: str {}".format(addr, text.replace("\n", "")))
         return text
 
 
 class SymKeyExchange:
-    def __init__(self, lifetime=60, debug=False):
-        self.debug = debug
+    def __init__(self, lifetime=60):
         self.key_max_lifetime = lifetime
         self.__keys = {}
         self.__keys_last_update = {}
-        dprint("ske: generate public msg and private key", self.debug)
+        logger.info("ske: generate public msg and private key")
         self.public_msg, self.__private_key = vault_udp_socket_helper.newhope_keygen()
         self.run_clean_ups = True
         threading.Timer(random.randint(1, math.floor(self.key_max_lifetime/2)), self.__thread_clean_up).start()
@@ -200,7 +191,7 @@ class SymKeyExchange:
     def __clean_up(self):
         """key have a lifespan, remove keys if time exceeded
         """
-        dprint("ske: clean up run", self.debug)
+        logger.debug("ske: clean up run")
         addr_remove = []
         for addr, last_seen in self.__keys_last_update.items():
             if math.floor(time.time()) - last_seen > self.key_max_lifetime:
@@ -209,7 +200,7 @@ class SymKeyExchange:
             self.__remove_key(addr)
 
     def key_exchange_b(self, public_msg, addr):
-        dprint("ske: Key-Exchange-B from {}".format(addr), self.debug)
+        logger.info("ske: Key-Exchange-B from {}".format(addr))
         public_msg_2, shared_key = vault_udp_socket_helper.newhope_shared_b(public_msg)
         self.__update_key(addr, shared_key)
         return public_msg_2
@@ -221,13 +212,13 @@ class SymKeyExchange:
         type addr: tuple
         """
         if tuple(addr) in self.__keys:
-            dprint("ske: remove key for addr {}".format(addr), self.debug)
+            logger.debug("ske: remove key for addr {}".format(addr))
             self.__keys.pop(tuple(addr))
             self.__keys_last_update.pop(tuple(addr))
 
     def key_exchange_a(self, public_msg, addr):
         if public_msg:
-            dprint("ske: Key-Exchange-A from {}".format(addr), self.debug)
+            logger.info("ske: Key-Exchange-A from {}".format(addr))
             self.__remove_key(addr)
             shared_key = vault_udp_socket_helper.newhope_shared_a(public_msg, self.__private_key)
             self.__update_key(addr, shared_key)
@@ -262,7 +253,7 @@ class SymKeyExchange:
         return: text
         rtype: str
         """
-        dprint("ske decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")), self.debug)
+        logger.debug("ske decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")))
         if not addr:
             return encrypted_text
 
@@ -277,9 +268,9 @@ class SymKeyExchange:
         except nacl.exceptions.InvalidkeyError:
             text = encrypted_text
         except Exception as e:
-            dprint("sym decryption error: {}".format(e), self.debug)
+            logger.info("sym decryption error: {}".format(e))
             text = encrypted_text
-        dprint("ske decrypted {}: {}".format(addr, text.replace("\n", "")), self.debug)
+        logger.debug("ske decrypted {}: {}".format(addr, text.replace("\n", "")))
         return text
 
     def __update_key(self, addr, key):
@@ -291,7 +282,7 @@ class SymKeyExchange:
         type key: str
         """
         if key:
-            dprint("SKE: update Key: {} for {}".format(key, addr), self.debug)
+            logger.info("SKE: update Key: {} for {}".format(key, addr))
             self.__keys.update({tuple(addr): key})
             self.__keys_last_update.update({tuple(addr): math.floor(time.time())})
 
@@ -311,10 +302,9 @@ class UDPSocketClass:
     udp_recv_data = PySignal.ClassSignal()
     udp_send_data = PySignal.ClassSignal()
 
-    def __init__(self, recv_port=11000, debug=False):
+    def __init__(self, recv_port=11000):
         self.recv_port = recv_port  # where do you expect to get a msg?
-        self.debug = debug
-        self.mtu = vault_ip.get_min_mtu(debug=self.debug) - 1
+        self.mtu = vault_ip.get_min_mtu() - 1
         self.mask_addresses = []
         self.reads = None
         self.writes = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -323,10 +313,10 @@ class UDPSocketClass:
         self.thread_started = False
         self.lifetime = 60
         # public key encryption -> use nacl for keys and encryption
-        self.pkse = PubKeySignalEncryption(debug=self.debug, lifetime=self.lifetime)
+        self.pkse = PubKeySignalEncryption(lifetime=self.lifetime)
         # test of symmetric encryption with key exchange from newhope
         # warning - maybe not stable, not production ready
-        self.ske = SymKeyExchange(debug=self.debug, lifetime=2*self.lifetime)
+        self.ske = SymKeyExchange(lifetime=2*self.lifetime)
         self.ske_init_time = {}
         # self.ske_init_public_msg = {}
         self.udp_send_data.connect(self.send_data)
@@ -341,16 +331,16 @@ class UDPSocketClass:
         type addr: tuple of ip and port
         """
         # TODO make checks look nicer
-        dprint("Update addr {}".format(addr), self.debug)
+        logger.info("Update addr {}".format(addr))
         if addr:
-            dprint("set new ip: {} port: {} combination".format(addr[0], addr[1]), self.debug)
+            logger.debug("set new ip: {} port: {} combination".format(addr[0], addr[1]))
             send_ip = addr[0]
             send_port = addr[1]
             try:
                 send_port_int = int(send_port)
             except ValueError:
                 send_port_int = 11000
-            dprint("new int port: {} - str port: {}".format(send_port_int, send_port), self.debug)
+            logger.debug("new int port: {} - str port: {}".format(send_port_int, send_port))
             if send_port_int < 1500:
                 send_port_int = 1500
             if send_port_int > 65000:
@@ -367,7 +357,7 @@ class UDPSocketClass:
         type recv_port: int
         """
         # TODO make checks look nicer
-        dprint("Update port {}".format(recv_port), self.debug)
+        logger.info("Update port {}".format(recv_port))
         if recv_port:
             recv_port_int = self.recv_port
             try:
@@ -392,31 +382,31 @@ class UDPSocketClass:
         """
         # TODO get send_addr
         packet, addr = self.reads.recvfrom(48000)
-        dprint("recv {} -> bytes: {} from {}".format(self.recv_port, packet, addr), self.debug)
+        logger.debug("recv {} -> bytes: {} from {}".format(self.recv_port, packet, addr))
         addr_ske = self.ske.ip_exists(addr[0])
         decrypt_data = self.ske.decrypt(packet.decode("utf-8"), addr_ske)
-        dprint("recv {} -> sym decrypt msg: {} from {}".format(self.recv_port,
-                                                               decrypt_data.replace("\n", ""), addr), self.debug)
+        logger.debug("recv {} -> sym decrypt msg: {} from {}".format(self.recv_port,
+                                                                     decrypt_data.replace("\n", ""), addr))
         if packet.decode("utf-8") == decrypt_data:
             decrypt_data = self.pkse.decrypt(packet.decode("utf-8"), addr)
-            dprint("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port,
-                                                                   decrypt_data.replace("\n", ""), addr), self.debug)
+            logger.debug("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port,
+                                                                         decrypt_data.replace("\n", ""), addr))
 
         try:
             dict_data = json.loads(decrypt_data)
         except Exception as e:
             dict_data = {}
-            dprint("error unpacking packet {}: {}".format(decrypt_data, e), self.debug)
+            logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
         if "data" in dict_data:
-            dprint("data to emmit: {}".format(dict_data.get("data").replace("\n", "")), self.debug)
+            logger.debug("data to emmit: {}".format(dict_data.get("data").replace("\n", "")))
             self.udp_recv_data.emit(dict_data.get("data"), addr)
         elif "akey" in dict_data:
             if "port" in dict_data:
                 port = dict_data.get("port")
                 addr = tuple([addr[0], port])
             if not self.pkse.key_exists(addr):
-                dprint("pkse: new asm key {} for {}".format(dict_data.get("akey", False), addr), self.debug)
+                logger.info("pkse: new asm key {} for {}".format(dict_data.get("akey", False), addr))
                 self.pkse.update_key(tuple(addr), dict_data.get("akey", False))
                 self.__send_akey(addr)
             self.pkse.update_key(tuple(addr), dict_data.get("akey", False))
@@ -425,7 +415,7 @@ class UDPSocketClass:
                 port = dict_data.get("port")
                 addr = tuple([addr[0], port])
             if not self.ske.key_exists(addr) and self.pkse.key_exists(addr):
-                dprint("{} -> start sym encryption - B".format(self.recv_port), self.debug)
+                logger.info("{} -> start sym encryption - B".format(self.recv_port))
                 public_msg = dict_data.get("skeyb", False)
                 time_ske = dict_data.get("time", 0)
                 if time_ske < self.ske_init_time.get(tuple(addr), time.time()) and public_msg:
@@ -437,7 +427,7 @@ class UDPSocketClass:
                     self.__send_skey(addr, False)
 
         elif "skeya" in dict_data:
-            dprint("start sym encryption - A", self.debug)
+            logger.info("start sym encryption - A")
             if "port" in dict_data:
                 port = dict_data.get("port")
                 addr = tuple([addr[0], port])
@@ -463,8 +453,8 @@ class UDPSocketClass:
             if tuple(addr) in self.ske_init_time:
                 self.ske_init_time.pop(tuple(addr))
         text_encrypted = self.pkse.encrypt(data_2_send, addr)
-        dprint("ske: {} -> {}: send bytes: {}".format(self.recv_port, addr,
-                                                      data_2_send.replace("\n", "").encode("utf-8")), self.debug)
+        logger.debug("ske: {} -> {}: send bytes: {}".format(self.recv_port, addr,
+                                                            data_2_send.replace("\n", "").encode("utf-8")))
         self.writes.sendto(text_encrypted.encode("utf-8"), tuple(addr))
 
     def thread_read_socket(self):
@@ -474,15 +464,15 @@ class UDPSocketClass:
         self.thread_started = True
         self.reads.settimeout(self.timeout)
         self.reads.bind(('', self.recv_port))
-        dprint("Thread to read socket started normal", self.debug)
+        logger.info("Thread to read socket started normal")
         while not self.thread_stop:
             try:
                 self.read_socket()
             except Exception as e:
-                dprint("error read socket: {}".format(e), False)
+                # logger.info("error read socket: {}".format(e))
                 # time.sleep(0.25)
                 pass
-        dprint("Thread closed normal", self.debug)
+        logger.info("Thread closed normal")
 
     def __padding(self, length):
         """create random string for padding data
@@ -493,7 +483,7 @@ class UDPSocketClass:
         return: random string
         rtype: str
         """
-        dprint("padding data len {}".format(length), self.debug)
+        logger.debug("padding data len {}".format(length))
         alphabet = "abcdefghijklmnopqrstuvwxyz"
         alphabet += alphabet.upper()
         alphabet += "0123456789.- +_?!^°§$%&/()=;:<>|"
@@ -507,7 +497,7 @@ class UDPSocketClass:
         """
         while not self.thread_stop:
             for addr in self.mask_addresses:
-                dprint("key management update for {}".format(addr), self.debug)
+                logger.debug("key management update for {}".format(addr))
                 self.__send_akey(addr=addr)
                 if not self.ske.key_exists(addr) and self.pkse.key_exists(addr):
                     self.__send_skey(addr=addr)
@@ -531,7 +521,7 @@ class UDPSocketClass:
         param addr: addr to send to - None for to all known
         type addr: tuple ip and port
         """
-        if type(str_to_send) is str:
+        if type(str_to_send) is not str:
             raise TypeError("expected str")
 
         data_2_send = {"data": str_to_send, "ign": ""}
@@ -546,8 +536,8 @@ class UDPSocketClass:
         param addr: addr to send data to
         type addr: tuple ip and port
         """
-        dprint("{} -> {}: str to send: {}".format(self.recv_port, addr,
-                                                  json.dumps(dict_data, indent=0).replace("\n", "")), self.debug)
+        logger.debug("{} -> {}: str to send: {}".format(self.recv_port, addr,
+                                                        json.dumps(dict_data, indent=0).replace("\n", "")))
         if len(json.dumps(dict_data, indent=0)) > self.mtu:
             raise ValueError("msg to long")
 
@@ -561,12 +551,12 @@ class UDPSocketClass:
 
         for address in all_addresses:
             text_encrypted = self.ske.encrypt(data_2_send, address)
-            dprint("{} -> {}: send bytes: {}".format(self.recv_port, address,
-                                                     text_encrypted.replace("\n", "").encode("utf-8")), self.debug)
+            logger.info("{} -> {}: send bytes: {}".format(self.recv_port, address,
+                                                          text_encrypted.replace("\n", "").encode("utf-8")))
             if text_encrypted == data_2_send:
                 text_encrypted = self.pkse.encrypt(data_2_send, address)
-                dprint("{} -> {}: send bytes: {}".format(self.recv_port, address,
-                                                         text_encrypted.replace("\n", "").encode("utf-8")), self.debug)
+                logger.debug("{} -> {}: send bytes: {}".format(self.recv_port, address,
+                                                               text_encrypted.replace("\n", "").encode("utf-8")))
             self.writes.sendto(text_encrypted.encode("utf-8"), tuple(address))
 
     def stop(self):
@@ -578,17 +568,21 @@ class UDPSocketClass:
 
 
 if __name__ == '__main__':
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.DEBUG)
     start = time.time()
-    udp = UDPSocketClass(11000, False)
+
+    udp = UDPSocketClass(11000)
     udp.update_addr(("127.0.0.1", "8000"))
     time.sleep(1)
-    udp2 = UDPSocketClass(8000, True)
+    udp2 = UDPSocketClass(8000)
     udp2.update_addr(("127.0.0.1", "11000"))
     for i in range(100):
-        print("{}: {}".format(i, math.floor(time.time() - start)))
+        logger.info("{}: {}".format(i, math.floor(time.time() - start)))
         udp.send_data("hello world {}".format(i))
         time.sleep(random.randint(5, 20))
         udp2.send_data("world helo {}".format(i))
         time.sleep(random.randint(5, 20))
+
     udp2.stop()
     udp.stop()
