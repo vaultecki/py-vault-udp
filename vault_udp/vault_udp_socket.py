@@ -1,8 +1,7 @@
 import vault_ip
-
+import vault_udp_encryption
 import json
 import math
-import nacl.exceptions
 import logging
 import random
 import socket
@@ -12,278 +11,6 @@ import PySignal
 
 
 logger = logging.getLogger(__name__)
-
-
-class PubKeySignalEncryption:
-    """public key encryption for use with udp class
-    """
-    def __init__(self, private_key=None, lifetime=60):
-        self.__keys = {}
-        self.__keys_last_update = {}
-        self.key_max_lifetime = lifetime
-        self.run_clean_ups = True
-        if private_key:
-            self.__private_key = private_key
-            self.public_key = vault_udp_socket_helper.generate_public_key(self.__private_key)
-        else:
-            self.public_key = self.generate_key()
-        threading.Timer(random.randint(1, math.floor(self.key_max_lifetime/2)), self.__thread_clean_up).start()
-
-    def generate_key(self):
-        """generates a new pair of private, public key
-
-        :return: public key
-        :rtype: str
-        """
-        logger.info("Generate new keys for asymmetric encryption")
-        public_key, private_key = vault_udp_socket_helper.generate_keys_asym()
-        self.set_private_key(private_key)
-        return public_key
-
-    def set_private_key(self, private_key):
-        """generates a new public key for the given private key and set private key to use
-
-        param private_key: private nacl key for use
-        type private_key: str
-        return: public key
-        rtype: str
-        """
-        logger.debug("pkse: set private key: {}".format(private_key))
-        self.__private_key = private_key
-        self.public_key = vault_udp_socket_helper.generate_public_key(self.__private_key)
-        return self.public_key
-
-    def update_key(self, addr, key):
-        """sets a key for later use in encryption for given address port pair
-
-        param addr: tuple of address port pair
-        type addr: tuple
-        param key: public key to use with address for encryption
-        type key: str
-        """
-        if key:
-            logger.debug("pkse: update Key: {} for {}".format(key, addr))
-            self.__keys.update({tuple(addr): key})
-            self.__keys_last_update.update({tuple(addr): math.floor(time.time())})
-
-    def key_exists(self, addr):
-        """checks if key for given addr exists in dict
-
-        :return: true if key exists, false if not
-        :rtype: bool
-        """
-        self.__clean_up()
-        return tuple(addr) in self.__keys
-
-    def remove_key(self, addr):
-        """remove key from dict
-
-        :return: public key
-        :rtype: str
-        """
-        if tuple(addr) in self.__keys:
-            logger.info("pkse: remove key for addr {}".format(addr))
-            self.__keys.pop(tuple(addr))
-            self.__keys_last_update.pop(tuple(addr))
-
-    def __thread_clean_up(self):
-        while self.run_clean_ups:
-            self.__clean_up()
-            time.sleep(random.randint(5, math.floor(self.key_max_lifetime/2)))
-
-    def __clean_up(self):
-        """keys have a lifespan, remove keys exceeding that span
-        """
-        addr_remove = []
-        for addr, last_seen in self.__keys_last_update.items():
-            if math.floor(time.time()) - last_seen > self.key_max_lifetime:
-                addr_remove.append(addr)
-        for addr in addr_remove:
-            self.remove_key(addr)
-
-    def decrypt(self, data, addr):
-        """tries to decrypt given encrypted text, if decryption not possible returns data
-
-        param data: encrypted text
-        type data: str
-        param addr: tuple of ip and port
-        type addr: tuple
-
-        return: text
-        rtype: str
-        """
-        logger.debug("pkse: recv {}: data {}".format(addr, data.replace("\n", "")))
-        if not self.__private_key:
-            return data
-
-        try:
-            text = vault_udp_socket_helper.decrypt_asym(self.__private_key, data)
-        except TypeError:
-            text = data
-        except nacl.exceptions.InvalidkeyError:
-            text = data
-        except Exception as e:
-            logger.debug("sym decryption error: {}".format(e))
-            text = data
-        logger.info("pkse: recv {}: text {}".format(addr, text.replace("\n", "")))
-        return text
-
-    def encrypt(self, data, addr):
-        """tries to encrypt given data, if not possible returns data
-
-        param data: plain text
-        type data: str
-        param addr: tuple of ip and port
-        type addr: tuple
-
-        return: encrypted text
-        rtype: str
-        """
-        logger.debug("pkse: encrypt {}: str {}".format(addr, data.replace("\n", "")))
-        if not self.__keys.get(tuple(addr), False):
-            return data
-
-        text = vault_udp_socket_helper.encrypt_asym(self.__keys.get(tuple(addr)), data)
-        logger.debug("pkse: encrypted {}: str {}".format(addr, text.replace("\n", "")))
-        return text
-
-
-class SymKeyExchange:
-    def __init__(self, lifetime=60):
-        self.key_max_lifetime = lifetime
-        self.__keys = {}
-        self.__keys_last_update = {}
-        logger.info("ske: generate public msg and private key")
-        self.public_msg, self.__private_key = vault_udp_socket_helper.newhope_keygen()
-        self.run_clean_ups = True
-        threading.Timer(random.randint(1, math.floor(self.key_max_lifetime/2)), self.__thread_clean_up).start()
-
-    def key_exists(self, addr):
-        """checks if key for given addr exists in dict
-
-        :return: true if key exists, false if not
-        :rtype: bool
-        """
-        self.__clean_up()
-        return tuple(addr) in self.__keys
-
-    def ip_exists(self, ip):
-        """checks for ip in key storage
-
-        param ip: ip
-        type ip: str
-
-        return: true if ip exists in storage, false if not
-        rtype: bool
-        """
-        key_list = list(self.__keys.keys())
-        for key in key_list:
-            if ip in key[0]:
-                return key
-        return False
-
-    def __thread_clean_up(self):
-        while self.run_clean_ups:
-            self.__clean_up()
-            time.sleep(random.randint(5, math.floor(self.key_max_lifetime/2)))
-
-    def __clean_up(self):
-        """key have a lifespan, remove keys if time exceeded
-        """
-        logger.debug("ske: clean up run")
-        addr_remove = []
-        for addr, last_seen in self.__keys_last_update.items():
-            if math.floor(time.time()) - last_seen > self.key_max_lifetime:
-                addr_remove.append(addr)
-        for addr in addr_remove:
-            self.__remove_key(addr)
-
-    def key_exchange_b(self, public_msg, addr):
-        logger.info("ske: Key-Exchange-B from {}".format(addr))
-        public_msg_2, shared_key = vault_udp_socket_helper.newhope_shared_b(public_msg)
-        self.__update_key(addr, shared_key)
-        return public_msg_2
-
-    def __remove_key(self, addr):
-        """removes key from storage
-
-        param addr: tuple of ip and port
-        type addr: tuple
-        """
-        if tuple(addr) in self.__keys:
-            logger.debug("ske: remove key for addr {}".format(addr))
-            self.__keys.pop(tuple(addr))
-            self.__keys_last_update.pop(tuple(addr))
-
-    def key_exchange_a(self, public_msg, addr):
-        if public_msg:
-            logger.info("ske: Key-Exchange-A from {}".format(addr))
-            self.__remove_key(addr)
-            shared_key = vault_udp_socket_helper.newhope_shared_a(public_msg, self.__private_key)
-            self.__update_key(addr, shared_key)
-
-    def encrypt(self, text, addr):
-        """tries to encrypt given encrypted text, if decryption not possible returns text as is
-
-        param text: plain text
-        type text: str
-        param addr: tuple of ip and port
-        type addr: tuple
-
-        return: text
-        rtype: str
-        """
-        self.__clean_up()
-        key = self.__keys.get(tuple(addr))
-        if not key:
-            return text
-
-        encrypted_text = vault_udp_socket_helper.encrypt_sym(key, text)
-        return encrypted_text
-
-    def decrypt(self, encrypted_text, addr):
-        """tries to decrypt given encrypted text, if decryption not possible returns text as is
-
-        param encrypted_text: encrypted text
-        type encrypted_text: str
-        param addr: tuple of ip and port
-        type addr: tuple or bool
-
-        return: text
-        rtype: str
-        """
-        logger.debug("ske decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")))
-        if not addr:
-            return encrypted_text
-
-        key = self.__keys.get(tuple(addr), False)
-        if not key:
-            return encrypted_text
-
-        try:
-            text = vault_udp_socket_helper.decrypt_sym(str(key), encrypted_text)
-        except TypeError:
-            text = encrypted_text
-        except nacl.exceptions.InvalidkeyError:
-            text = encrypted_text
-        except Exception as e:
-            logger.info("sym decryption error: {}".format(e))
-            text = encrypted_text
-        logger.debug("ske decrypted {}: {}".format(addr, text.replace("\n", "")))
-        return text
-
-    def __update_key(self, addr, key):
-        """sets a key for later use in encryption for given address port pair
-
-        param addr: tuple of address port pair
-        type addr: tuple
-        param key: public key to use with address for encryption
-        type key: str
-        """
-        if key:
-            logger.info("SKE: update Key: {} for {}".format(key, addr))
-            self.__keys.update({tuple(addr): key})
-            self.__keys_last_update.update({tuple(addr): math.floor(time.time())})
 
 
 class UDPSocketClass:
@@ -312,10 +39,10 @@ class UDPSocketClass:
         self.thread_started = False
         self.lifetime = 60
         # public key encryption -> use nacl for keys and encryption
-        self.pkse = PubKeySignalEncryption(lifetime=self.lifetime)
+        self.pkse = vault_udp_encryption.VaultAsymmetricEncryption(lifetime=self.lifetime)
         # test of symmetric encryption with key exchange from newhope
         # warning - maybe not stable, not production ready
-        self.ske = SymKeyExchange(lifetime=2*self.lifetime)
+        self.ske = vault_udp_encryption.VaultSymmetricEncryption(lifetime=2*self.lifetime)
         self.ske_init_time = {}
         # self.ske_init_public_msg = {}
         self.udp_send_data.connect(self.send_data)
@@ -560,8 +287,8 @@ class UDPSocketClass:
 
     def stop(self):
         """ stops pkse, ske clean_ups and socket operation"""
-        self.pkse.run_clean_ups = False
-        self.ske.run_clean_ups = False
+        self.pkse.stop()
+        self.ske.stop()
         self.thread_stop = True
         self.reads.close()
 

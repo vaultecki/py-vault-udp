@@ -11,16 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 class VaultEncryption:
-    __keys = dict()
-    __keys_last_update = dict()
-    __key_max_lifetime = 60
-    __run_clean_ups = True
-
-    def __new__(cls, name, bases, dict):
-        needed_functions = ["encrypt", "decrypt", "generate_key"]
-        for function in needed_functions:
-            if function not in dict:
-                raise Exception("class not complete")
+    def __init__(self, lifetime=60):
+        self.keys = dict()
+        self.keys_last_update = dict()
+        self.key_max_lifetime = lifetime
+        self.run_clean_ups = True
 
     def key_exists(self, addr):
         """checks if key for given addr exists in dict
@@ -28,8 +23,23 @@ class VaultEncryption:
         :return: true if key exists, false if not
         :rtype: bool
         """
-        self.__clean_up()
-        return tuple(addr) in self.__keys
+        self.clean_up()
+        return tuple(addr) in self.keys
+
+    def ip_exists(self, ip):
+        """checks for ip in key storage
+
+        param ip: ip
+        type ip: str
+
+        return: true if ip exists in storage, false if not
+        rtype: bool
+        """
+        key_list = list(self.__keys.keys())
+        for key in key_list:
+            if ip in key[0]:
+                return key
+        return False
 
     def update_key(self, addr, key):
         """sets a key for later use in encryption for given address port pair
@@ -41,8 +51,8 @@ class VaultEncryption:
         """
         if key:
             logger.debug("ve: update Key: {} for {}".format(key, addr))
-            self.__keys.update({tuple(addr): key})
-            self.__keys_last_update.update({tuple(addr): math.floor(time.time())})
+            self.keys.update({tuple(addr): key})
+            self.keys_last_update.update({tuple(addr): math.floor(time.time())})
 
     def remove_key(self, addr):
         """remove key from dict
@@ -50,34 +60,34 @@ class VaultEncryption:
         :return: public key
         :rtype: str
         """
-        if tuple(addr) in self.__keys:
+        if tuple(addr) in self.keys:
             logger.info("ve: remove key for addr {}".format(addr))
-            self.__keys.pop(tuple(addr))
-            self.__keys_last_update.pop(tuple(addr))
+            self.keys.pop(tuple(addr))
+            self.keys_last_update.pop(tuple(addr))
 
-    def __thread_clean_up(self):
-        while self.__run_clean_ups:
-            self.__clean_up()
-            time.sleep(random.randint(5, math.floor(self.__key_max_lifetime/2)))
+    def thread_clean_up(self):
+        while self.run_clean_ups:
+            self.clean_up()
+            time.sleep(random.randint(5, math.floor(self.key_max_lifetime/2)))
 
-    def __clean_up(self):
+    def clean_up(self):
         """keys have a lifespan, remove keys exceeding that span
         """
         addr_remove = []
-        for addr, last_seen in self.__keys_last_update.items():
-            if math.floor(time.time()) - last_seen > self.__key_max_lifetime:
+        for addr, last_seen in self.keys_last_update.items():
+            if math.floor(time.time()) - last_seen > self.key_max_lifetime:
                 addr_remove.append(addr)
         for addr in addr_remove:
             self.remove_key(addr)
 
+    def stop(self):
+        self.run_clean_ups = False
 
-class VaultAsymmetricEncryption(metaclass=VaultEncryption):
+
+class VaultAsymmetricEncryption(VaultEncryption):
     def __init__(self, lifetime=60, private_key=None):
         logger.info("init [v]ault [a]ymmetric [e]ncryption")
-        self.__keys = {}
-        self.__keys_last_update = {}
-        self.__key_max_lifetime = lifetime
-        self.__run_clean_ups = True
+        super().__init__(lifetime)
         self.__private_key = ""
         self.public_key = ""
         if private_key:
@@ -149,36 +159,34 @@ class VaultAsymmetricEncryption(metaclass=VaultEncryption):
         rtype: str
         """
         logger.debug("vae: encrypt {}: str {}".format(addr, data.replace("\n", "")))
-        if not self.__keys.get(tuple(addr), False):
+        if not self.keys.get(tuple(addr), False):
             return data
 
-        text = vault_udp_socket_helper.encrypt_asym(self.__keys.get(tuple(addr)), data)
+        text = vault_udp_socket_helper.encrypt_asym(self.keys.get(tuple(addr)), data)
         logger.debug("vae: encrypted {}: str {}".format(addr, text.replace("\n", "")))
         return text
 
 
-class VaultSymmetricEncryption(metaclass=VaultEncryption):
+class VaultSymmetricEncryption(VaultEncryption):
     def __init__(self, lifetime=180):
         logger.info("init [v]ault [s]ymmetric [e]ncryption")
-        self.__keys = {}
-        self.__keys_last_update = {}
-        self.key_max_lifetime = lifetime
+        super().__init__(lifetime)
         self.public_msg, self.__private_key = vault_udp_socket_helper.newhope_keygen()
         self.run_clean_ups = True
         # threading.Timer(random.randint(1, math.floor(self.key_max_lifetime / 2)), self.__thread_clean_up).start()
 
     def key_exchange_b(self, public_msg, addr):
-        logger.info("ske: Key-Exchange-B from {}".format(addr))
+        logger.info("vse: Key-Exchange-B from {}".format(addr))
         public_msg_2, shared_key = vault_udp_socket_helper.newhope_shared_b(public_msg)
-        self.__update_key(addr, shared_key)
+        self.update_key(addr, shared_key)
         return public_msg_2
 
     def key_exchange_a(self, public_msg, addr):
         if public_msg:
-            logger.info("ske: Key-Exchange-A from {}".format(addr))
-            self.__remove_key(addr)
+            logger.info("vse: Key-Exchange-A from {}".format(addr))
+            self.remove_key(addr)
             shared_key = vault_udp_socket_helper.newhope_shared_a(public_msg, self.__private_key)
-            self.__update_key(addr, shared_key)
+            self.update_key(addr, shared_key)
 
     def encrypt(self, text, addr):
         """tries to encrypt given encrypted text, if decryption not possible returns text as is
@@ -191,8 +199,8 @@ class VaultSymmetricEncryption(metaclass=VaultEncryption):
         return: text
         rtype: str
         """
-        self.__clean_up()
-        key = self.__keys.get(tuple(addr))
+        self.clean_up()
+        key = self.keys.get(tuple(addr))
         if not key:
             return text
 
@@ -210,11 +218,11 @@ class VaultSymmetricEncryption(metaclass=VaultEncryption):
         return: text
         rtype: str
         """
-        logger.debug("ske decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")))
+        logger.debug("vse decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")))
         if not addr:
             return encrypted_text
 
-        key = self.__keys.get(tuple(addr), False)
+        key = self.keys.get(tuple(addr), False)
         if not key:
             return encrypted_text
 
@@ -227,11 +235,18 @@ class VaultSymmetricEncryption(metaclass=VaultEncryption):
         except Exception as e:
             logger.info("sym decryption error: {}".format(e))
             text = encrypted_text
-        logger.debug("ske decrypted {}: {}".format(addr, text.replace("\n", "")))
+        logger.debug("vse decrypted {}: {}".format(addr, text.replace("\n", "")))
         return text
 
 
 if __name__ == '__main__':
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(level=logging.DEBUG)
+
     print("moin")
-    ase = VaultAsymmetricEncryption()
-    print(ase)
+    vase = VaultAsymmetricEncryption()
+    print(vase)
+
+    print("tag")
+    vse = VaultSymmetricEncryption()
+    print(vse)
