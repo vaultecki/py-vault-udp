@@ -172,15 +172,14 @@ class UDPSocketClass:
         # print("{} -> public msg: {}".format(self.recv_port, public_msg))
         if not public_msg:
             time_ske = self.ske_init_time.get(tuple(addr), time.time())
-            data_2_send = json.dumps({"skeyb": self.ske.public_msg, "port": self.recv_port, "time": time_ske}, indent=0)
+            data_2_send = json.dumps({"skeyb": self.ske.public_msg, "port": self.recv_port, "time": time_ske})
             self.ske_init_time.update({tuple(addr): time_ske})
         else:
-            data_2_send = json.dumps({"skeya": public_msg, "port": self.recv_port}, indent=0)
+            data_2_send = json.dumps({"skeya": public_msg, "port": self.recv_port})
             if tuple(addr) in self.ske_init_time:
                 self.ske_init_time.pop(tuple(addr))
         text_encrypted = self.pkse.encrypt(data_2_send, addr)
-        logger.debug("ske: {} -> {}: send bytes: {}".format(self.recv_port, addr,
-                                                            data_2_send.replace("\n", "").encode("utf-8")))
+        logger.debug("ske: {} -> {}: send bytes: {}".format(self.recv_port, addr, data_2_send.encode("utf-8")))
         self.writes.sendto(text_encrypted.encode("utf-8"), tuple(addr))
 
     def thread_read_socket(self):
@@ -262,13 +261,12 @@ class UDPSocketClass:
         param addr: addr to send data to
         type addr: tuple ip and port
         """
-        logger.debug("{} -> {}: str to send: {}".format(self.recv_port, addr,
-                                                        json.dumps(dict_data, indent=0).replace("\n", "")))
-        if len(json.dumps(dict_data, indent=0)) > self.mtu:
+        logger.debug("{} -> {}: str to send: {}".format(self.recv_port, addr, json.dumps(dict_data)))
+        if len(json.dumps(dict_data)) > self.mtu:
             raise ValueError("msg to long")
 
-        dict_data.update({"ign": self.__padding(self.mtu - len(json.dumps(dict_data, indent=0)))})
-        data_2_send = json.dumps(dict_data, indent=0)
+        dict_data.update({"ign": self.__padding(self.mtu - len(json.dumps(dict_data)))})
+        data_2_send = json.dumps(dict_data)
 
         if addr:
             all_addresses = [addr]
