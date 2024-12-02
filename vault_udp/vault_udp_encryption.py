@@ -35,7 +35,7 @@ class VaultEncryption:
         return: true if ip exists in storage, false if not
         rtype: bool
         """
-        key_list = list(self.__keys.keys())
+        key_list = list(self.keys.keys())
         for key in key_list:
             if ip in key[0]:
                 return key
