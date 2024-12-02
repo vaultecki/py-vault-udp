@@ -13,7 +13,7 @@ def get_min_mtu():
         logger.debug("network interface: {} got following properties: {}".format(interface, value))
         mtu_list.append(value.mtu)
     if mtu_list:
-        logger.debug("return minimum mtu {}".format(min(mtu_list)))
+        logger.info("return minimum mtu {}".format(min(mtu_list)))
         return min(mtu_list)
     return 1500
 
