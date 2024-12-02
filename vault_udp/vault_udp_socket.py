@@ -111,12 +111,10 @@ class UDPSocketClass:
         logger.debug("recv {} -> bytes: {} from {}".format(self.recv_port, packet, addr))
         addr_ske = self.ske.ip_exists(addr[0])
         decrypt_data = self.ske.decrypt(packet.decode("utf-8"), addr_ske)
-        logger.debug("recv {} -> sym decrypt msg: {} from {}".format(self.recv_port,
-                                                                     decrypt_data.replace("\n", ""), addr))
+        logger.debug("recv {} -> sym decrypt msg: {} from {}".format(self.recv_port, decrypt_data, addr))
         if packet.decode("utf-8") == decrypt_data:
             decrypt_data = self.pkse.decrypt(packet.decode("utf-8"), addr)
-            logger.debug("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port,
-                                                                         decrypt_data.replace("\n", ""), addr))
+            logger.debug("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port, decrypt_data, addr))
 
         try:
             dict_data = json.loads(decrypt_data)
@@ -125,7 +123,7 @@ class UDPSocketClass:
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
         if "data" in dict_data:
-            logger.debug("data to emmit: {}".format(dict_data.get("data").replace("\n", "")))
+            logger.debug("data to emmit: {}".format(dict_data.get("data")))
             self.udp_recv_data.emit(dict_data.get("data"), addr)
         elif "akey" in dict_data:
             if "port" in dict_data:
@@ -276,11 +274,11 @@ class UDPSocketClass:
         for address in all_addresses:
             text_encrypted = self.ske.encrypt(data_2_send, address)
             logger.info("{} -> {}: send bytes: {}".format(self.recv_port, address,
-                                                          text_encrypted.replace("\n", "").encode("utf-8")))
+                                                          text_encrypted.encode("utf-8")))
             if text_encrypted == data_2_send:
                 text_encrypted = self.pkse.encrypt(data_2_send, address)
                 logger.debug("{} -> {}: send bytes: {}".format(self.recv_port, address,
-                                                               text_encrypted.replace("\n", "").encode("utf-8")))
+                                                               text_encrypted.encode("utf-8")))
             self.writes.sendto(text_encrypted.encode("utf-8"), tuple(address))
 
     def stop(self):

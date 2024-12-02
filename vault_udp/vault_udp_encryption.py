@@ -131,7 +131,7 @@ class VaultAsymmetricEncryption(VaultEncryption):
         return: text
         rtype: str
         """
-        logger.debug("vae: recv {}: data {}".format(addr, data.replace("\n", "")))
+        logger.debug("vae: recv {}: data {}".format(addr, data))
         if not self.__private_key:
             return data
 
@@ -144,7 +144,7 @@ class VaultAsymmetricEncryption(VaultEncryption):
         except Exception as e:
             logger.debug("asym decryption error: {}".format(e))
             text = data
-        logger.info("vae: recv {}: text {}".format(addr, text.replace("\n", "")))
+        logger.info("vae: recv {}: text {}".format(addr, text))
         return text
 
     def encrypt(self, data, addr):
@@ -158,12 +158,12 @@ class VaultAsymmetricEncryption(VaultEncryption):
         return: encrypted text
         rtype: str
         """
-        logger.debug("vae: encrypt {}: str {}".format(addr, data.replace("\n", "")))
+        logger.debug("vae: encrypt {}: str {}".format(addr, data))
         if not self.keys.get(tuple(addr), False):
             return data
 
         text = vault_udp_socket_helper.encrypt_asym(self.keys.get(tuple(addr)), data)
-        logger.debug("vae: encrypted {}: str {}".format(addr, text.replace("\n", "")))
+        logger.debug("vae: encrypted {}: str {}".format(addr, text))
         return text
 
 
@@ -218,7 +218,7 @@ class VaultSymmetricEncryption(VaultEncryption):
         return: text
         rtype: str
         """
-        logger.debug("vse decrypt {}: {}".format(addr, encrypted_text.replace("\n", "")))
+        logger.debug("vse decrypt {}: {}".format(addr, encrypted_text))
         if not addr:
             return encrypted_text
 
@@ -235,7 +235,7 @@ class VaultSymmetricEncryption(VaultEncryption):
         except Exception as e:
             logger.info("sym decryption error: {}".format(e))
             text = encrypted_text
-        logger.debug("vse decrypted {}: {}".format(addr, text.replace("\n", "")))
+        logger.debug("vse decrypted {}: {}".format(addr, text))
         return text
 
 
