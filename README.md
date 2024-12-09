@@ -1,3 +1,3 @@
 # py-vault-udp
 
-own python udp class, used in other projects
+own python udp wrapper class, used in other projects
