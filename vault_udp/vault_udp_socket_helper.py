@@ -1,5 +1,4 @@
 import base64
-import json
 import nacl.encoding
 import nacl.hash
 import nacl.public
@@ -7,56 +6,6 @@ import nacl.secret
 import nacl.signing
 import nacl.utils
 import pynewhope.newhope
-import uuid
-import secrets
-import tinyec.ec
-import tinyec.registry
-
-
-def json_file_read(filename="config/config.json"):
-    """reads filename with json inside and returns file data as dict
-
-    param filename: filename to read
-    type filename: str
-
-    return: return dict of data from json file, empty dict returned if error in reading file or json
-    rtype: dict
-    """
-    try:
-        f = open(filename, "r", encoding="utf-8")
-        fdata = f.read()
-        f.close()
-    except Exception as e:
-        print("error: {}".format(e))
-        return {}
-    try:
-        data = json.loads(fdata)
-    except Exception as e:
-        print("Oops Error: {}".format(e))
-        data = {}
-    return data
-
-
-def json_file_write(data={}, filename="config/config_last.json", e=4):
-    """writes data from dict to given filename as json
-
-    param filename: filename to write
-    type filename: str
-    param data: dict of data to write to file
-    type data: dict
-    param e: indentation for json
-    type e: int
-    """
-    json_str = json.dumps(data, indent=e)
-    # print(json_str)
-    try:
-        f = open(filename, "w", encoding="utf-8")
-        f.write(json_str)
-        f.close()
-    except Exception as e:
-        print("Oops Error: {}".format(e))
-        return False
-    return True
 
 
 def encrypt_sym(key, message):
@@ -103,13 +52,6 @@ def decrypt_sym(key, encrypted_binary_str):
     return plaintext_str
 
 
-def hashsum(passwd):
-    pw_hasher = nacl.hash.sha512
-    bytestring = str(passwd).encode('utf-8')
-    digest = pw_hasher(bytestring, encoder=nacl.encoding.HexEncoder)
-    return digest.decode('utf-8')
-
-
 def message_sign(private_key, message):
     signing_key = nacl.signing.SigningKey(private_key.encode())
     signed = signing_key.sign(message)
@@ -154,11 +96,6 @@ def from_base64_str(msg):
 def to_binary(msg):
     binary = base64.b64decode(msg)
     return binary
-
-
-def create_uniqueid():
-    value = uuid.uuid4()
-    return value
 
 
 def generate_keys_asym():
@@ -275,50 +212,6 @@ def newhope_shared_a(public_msg, private_key):
     return shared_key
 
 
-def ecdh_keygen():
-    # warning for testing only - do not use it for production
-    curve = tinyec.registry.get_curve('secp256r1')
-    private_key = secrets.randbelow(curve.field.n)
-    public_key = private_key * curve.g
-
-    private_key = ecdh_key_2_str(private_key)
-    x = ecdh_key_2_str(public_key.x)
-    y = ecdh_key_2_str(public_key.y)
-    public_key = (x, y)
-    return public_key, private_key
-
-
-def ecdh_key_2_str(key):
-    # warning for testing only - do not use it for production
-    # todo get/ use len bytearray
-    length_array = 32
-    bytes_data = key.to_bytes(length_array, byteorder="little")
-    key = to_base64_str(bytes_data)
-    return key
-
-
-def ecdh_str_2_key(key_str):
-    # warning for testing only - do not use it for production
-    key_str = from_base64_byte(key_str)
-    key = int.from_bytes(key_str, byteorder="little")
-    return key
-
-
-def ecdh_shared_key(private_key, public_key):
-    # warning for testing only - do not use it for production
-    x = ecdh_str_2_key(public_key[0])
-    y = ecdh_str_2_key(public_key[1])
-    curve = tinyec.registry.get_curve('secp256r1')
-    public_key_point = tinyec.ec.Point(curve, x, y)
-    private_key = ecdh_str_2_key(private_key)
-
-    shared_key = private_key * public_key_point
-    x = ecdh_key_2_str(shared_key.x)
-    y = ecdh_key_2_str(shared_key.y)
-    shared_key = (x, y)
-    return shared_key
-
-
 if __name__ == '__main__':
     text = "geheim"
 
@@ -366,28 +259,3 @@ if __name__ == '__main__':
     print(encrypted_text)
     decrypted_text = decrypt_sym(shared_key_2, encrypted_text)
     print(decrypted_text)
-
-    # key exchange with elliptic curve
-    print("ecdh key exchange test")
-    a_pub, a_pri = ecdh_keygen()
-    b_pub, b_pri = ecdh_keygen()
-
-    a_sk = ecdh_shared_key(a_pri, b_pub)
-    b_sk = ecdh_shared_key(b_pri, a_pub)
-
-    print("Public key A: {}".format(a_pub))
-    print("Private key A: {}".format(a_pri))
-    print("Shared key A: {}".format(a_sk))
-    print("Public key B: {}".format(b_pub))
-    print("Private key B: {}".format(b_pri))
-    print("Shared key B: {}".format(b_sk))
-
-    if a_sk == b_sk:
-        print("shared key matches")
-
-    # Test Shared Keys
-    text = "geheim"
-    geheim = encrypt_sym(a_sk[0], text)
-    print("encrypted with shared key from A: {}".format(geheim))
-    normal = decrypt_sym(b_sk[0], geheim)
-    print("encrypted with shared key from B: {}".format(normal))
