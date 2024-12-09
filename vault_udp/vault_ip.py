@@ -29,10 +29,14 @@ def get_ips():
         result4 = '127.0.0.1'
     finally:
         s.close()
-    result6raw = socket.getaddrinfo(h_name, 0, socket.AF_INET6)
-    result6 = []
-    for ipv6 in result6raw:
-        result6.append(ipv6[4][0])
+    try:
+        result6raw = socket.getaddrinfo(h_name, 0, socket.AF_INET6)
+        result6 = []
+        for ipv6 in result6raw:
+            result6.append(ipv6[4][0])
+    except Exception as e:
+        logger.warning("Warning: {}".format(e))
+        result6 = []
     result6 = list(dict.fromkeys(result6))
     logger.debug("Return IPs {} and {}".format(result4, result6))
     return [[result4], result6]

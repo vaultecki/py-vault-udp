@@ -1,5 +1,5 @@
-import vault_ip
-import vault_udp_encryption
+import include.udp.vault_udp.vault_ip as vault_ip
+import include.udp.vault_udp.vault_udp_encryption as vault_udp_encryption
 import json
 import math
 import logging
