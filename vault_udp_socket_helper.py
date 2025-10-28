@@ -56,12 +56,12 @@ def encrypt_asym(public_key, message):
     return: encrypted message
     rtype: str
     """
-    if type(message) is str:
+    if isinstance(message, str):
         message = message.encode("utf-8")
-    if not type(message) is bytes:
+    if not isinstance(message, bytes):
         raise TypeError
     encrypt_box = nacl.public.SealedBox(nacl.public.PublicKey(b64_str_to_bytes(public_key)))
-    encrypted = encrypt_box.encrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
+    encrypted = encrypt_box.encrypt(message, encoder=nacl.encoding.Base64Encoder)
     return encrypted
 
 
@@ -76,12 +76,12 @@ def decrypt_asym(private_key, message):
     return: decrypted message
     rtype: str
     """
-    if type(message) is str:
+    if isinstance(message, str):
         message = message.encode("utf-8")
-    if not type(message) is bytes:
+    if not isinstance(message, bytes):
         raise TypeError
     decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(b64_str_to_bytes(private_key)))
-    decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
+    decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder)
     return decrypted
 
 

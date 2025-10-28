@@ -1,3 +1,5 @@
+from msgpack import unpack
+
 import vault_ip
 import vault_udp_encryption
 import json
@@ -8,6 +10,8 @@ import socket
 import threading
 import time
 import PySignal
+import pyzstd
+import msgpack
 
 logger = logging.getLogger(__name__)
 
@@ -119,23 +123,24 @@ class UDPSocketClass:
         logger.debug("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port, decrypt_data, addr))
 
         try:
-            dict_data = json.loads(decrypt_data)
+            unpacked_data = msgpack.unpackb(decrypt_data)
+            msg_data = pyzstd.decompress(unpacked_data[0])
         except Exception as e:
-            dict_data = {}
+            msg_data = {}
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
-        if "data" in dict_data:
-            logger.debug("data to emmit: {}".format(dict_data.get("data")))
-            self.udp_recv_data.emit(dict_data.get("data"), addr)
-        elif "akey" in dict_data:
-            if "port" in dict_data:
-                port = dict_data.get("port")
+        if "akey" in msg_data:
+            if "port" in msg_data:
+                port = msg_data.get("port")
                 addr = tuple([addr[0], port])
             if not self.pkse.key_exists(addr):
-                logger.info("pkse: new asm key {} for {}".format(dict_data.get("akey", False), addr))
-                self.pkse.update_key(tuple(addr), dict_data.get("akey", False))
+                logger.info("pkse: new asm key {} for {}".format(msg_data.get("akey", False), addr))
+                self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
                 self.__send_akey(addr)
-            self.pkse.update_key(tuple(addr), dict_data.get("akey", False))
+            self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
+        else:
+            logger.debug("data to emmit: {}".format(msg_data.get("data")))
+            self.udp_recv_data.emit(msg_data, addr)
 
     def thread_read_socket(self):
         """funktion to start binding and listening on udp sockets
@@ -194,7 +199,7 @@ class UDPSocketClass:
         data_2_send = {"akey": self.pkse.public_key, "port": self.recv_port, "ign": ""}
         self.__send(data_2_send, addr)
 
-    def send_data(self, str_to_send, addr=None):
+    def send_data(self, data_2_send, addr=None):
         """function to call from user of udp socket to send data
            prepares data
 
@@ -203,13 +208,15 @@ class UDPSocketClass:
         param addr: addr to send to - None for to all known
         type addr: tuple ip and port
         """
-        if type(str_to_send) is not str:
-            raise TypeError("expected str")
+        if isinstance(data_2_send, str):
+            data_2_send = data_2_send.encode("utf-8")
+        if not isinstance(data_2_send, bytes):
+            raise TypeError
+        compressed_data = pyzstd.compress(data_2_send, 16)
 
-        data_2_send = {"data": str_to_send, "ign": ""}
-        self.__send(dict_data=data_2_send, addr=addr)
+        self.__send(data=compressed_data, addr=addr)
 
-    def __send(self, dict_data, addr=None):
+    def __send(self, data, addr=None):
         """ internal send method, applies opportunistic encryption before sending data over udp
             applies padding to data to get equal length
 
@@ -218,12 +225,13 @@ class UDPSocketClass:
         param addr: addr to send data to
         type addr: tuple ip and port
         """
-        logger.debug("{} -> {}: str to send: {}".format(self.recv_port, addr, json.dumps(dict_data)))
-        if len(json.dumps(dict_data)) > self.mtu:
+        logger.debug("{} -> {}: data to send: {}".format(self.recv_port, addr, data))
+        packed_data = msgpack.packb([data])
+        if len(packed_data) > self.mtu:
             raise ValueError("msg to long")
 
-        dict_data.update({"ign": self.__padding(self.mtu - len(json.dumps(dict_data)))})
-        data_2_send = json.dumps(dict_data)
+        padding_data = self.__padding(self.mtu - len(packed_data))
+        packed_data = msgpack.packb([data, padding_data])
 
         if addr:
             all_addresses = [addr]
@@ -231,10 +239,10 @@ class UDPSocketClass:
             all_addresses = self.mask_addresses
 
         for address in all_addresses:
-            text_encrypted = self.pkse.encrypt(data_2_send, address)
+            text_encrypted = self.pkse.encrypt(packed_data, address)
             logger.debug("{} -> {}: send bytes: {}".format(self.recv_port, address,
-                                                               text_encrypted.encode("utf-8")))
-            self.writes.sendto(text_encrypted.encode("utf-8"), tuple(address))
+                                                               text_encrypted))
+            self.writes.sendto(text_encrypted, tuple(address))
 
     def stop(self):
         """ stops pkse, ske clean_ups and socket operation"""
