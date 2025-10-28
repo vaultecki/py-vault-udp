@@ -9,13 +9,17 @@ logger = logging.getLogger(__name__)
 def get_min_mtu():
     interface_data = psutil.net_if_stats()
     mtu_list = []
-    for interface, value in interface_data.items():
-        logger.debug("network interface: {} got following properties: {}".format(interface, value))
-        mtu_list.append(value.mtu)
-    if mtu_list:
-        logger.info("return minimum mtu {}".format(min(mtu_list)))
-        return min(mtu_list)
-    return 1500
+    for interface, stats in interface_data.items():
+        # Nur Interfaces berücksichtigen, die "up" sind
+        # und nicht loopback ("lo") heißen.
+        if stats.isup and not interface.lower().startswith('lo'):
+            logger.debug("network interface: {} got following properties: {}".format(interface, stats))
+            mtu_list.append(stats.mtu)
+        else:
+            logger.debug(f"Skipping interface {interface} (isup: {stats.isup})")
+    min_mtu = min(mtu_list)
+    logger.info("return minimum mtu {}".format(min_mtu))
+    return min_mtu
 
 
 def get_ips():
