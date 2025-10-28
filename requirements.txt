@@ -1,4 +1,4 @@
-msgpack-python
+msgpack
 pyzstd
 psutil
 PySignal~=1.1.1

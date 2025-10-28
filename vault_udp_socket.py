@@ -1,5 +1,3 @@
-from msgpack import unpack
-
 import vault_ip
 import vault_udp_encryption
 import json
