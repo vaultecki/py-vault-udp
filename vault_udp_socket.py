@@ -1,3 +1,5 @@
+import os
+
 import vault_ip
 import vault_udp_encryption
 import json
@@ -175,18 +177,16 @@ class UDPSocketClass:
     def __padding(self, length):
         """create random string for padding data
 
-        param length: length of return string
+        param length: length of return bytes
         type length: int
 
-        return: random string
-        rtype: str
+        return: random bytes
+        rtype: bytes
         """
+        if length <= 0:
+            return b""  # Leere bytes
         logger.debug("padding data len {}".format(length))
-        alphabet = "abcdefghijklmnopqrstuvwxyz"
-        alphabet += alphabet.upper()
-        alphabet += "0123456789.- +_?!^°§$%&/()=;:<>|"
-
-        return "".join(random.choices(alphabet, k=length))
+        return os.urandom(length)
 
     def __thread_key_management(self):
         """key management - resend pkse keys and start ske key exchange if needed
