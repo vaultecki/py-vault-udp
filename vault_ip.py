@@ -17,6 +17,9 @@ def get_min_mtu():
             mtu_list.append(stats.mtu)
         else:
             logger.debug(f"Skipping interface {interface} (isup: {stats.isup})")
+    if not mtu_list:
+        logger.warning("Keine aktiven Netzwerk-Interfaces gefunden. Nutze Fallback-MTU 1500.")
+        return 1500
     min_mtu = min(mtu_list)
     logger.info("return minimum mtu {}".format(min_mtu))
     return min_mtu
