@@ -1,3 +1,5 @@
+import binascii
+
 import vault_udp_socket_helper
 import time
 import random
@@ -130,19 +132,21 @@ class VaultAsymmetricEncryption:
             return data
 
         try:
-            text = vault_udp_socket_helper.decrypt_asym(self.__private_key, data)
+            # 'data' sind die rohen Bytes vom Socket
+            text_bytes = vault_udp_socket_helper.decrypt_asym(self.__private_key, data)
         except nacl.exceptions.CryptoError as e:
-            logger.debug(
-                f"Asymmetrische Entschlüsselung für {addr} fehlgeschlagen (vermutlich unverschlüsselte Daten): {e}")
-            text = data
-        except (TypeError, binascii.Error) as e:  # z.B. ungültiges Base64
-            logger.debug(f"Fehler bei Entschlüsselungs-Vorbereitung für {addr}: {e}")
-            text = data
+            logger.debug(f"Entschlüsselung fehlgeschlagen: {e}")
+            # Wenn Entschlüsselung fehlschlägt, ist 'data' vielleicht unverschlüsselt
+            # Wir geben die rohen Bytes zurück; read_socket wird am msgpack scheitern
+            return data
+        except (TypeError, binascii.Error) as e:
+            logger.debug(f"Fehler bei Entschlüsselungs-Vorbereitung: {e}")
+            return data
         except Exception as e:
             logger.debug(f"Allg. Entschlüsselungsfehler: {e}")
-            text = data
-        logger.info("vae: recv {}: text {}".format(addr, text))
-        return text
+            return data
+
+        return text_bytes
 
     def encrypt(self, data, addr):
         """tries to encrypt given data, if not possible returns data

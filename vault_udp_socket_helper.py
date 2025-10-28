@@ -61,7 +61,7 @@ def encrypt_asym(public_key, message):
     if not isinstance(message, bytes):
         raise TypeError
     encrypt_box = nacl.public.SealedBox(nacl.public.PublicKey(b64_str_to_bytes(public_key)))
-    encrypted = encrypt_box.encrypt(message, encoder=nacl.encoding.Base64Encoder)
+    encrypted = encrypt_box.encrypt(message)
     return encrypted
 
 
@@ -81,7 +81,7 @@ def decrypt_asym(private_key, message):
     if not isinstance(message, bytes):
         raise TypeError
     decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(b64_str_to_bytes(private_key)))
-    decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder)
+    decrypted = decrypt_box.decrypt(message)
     return decrypted
 
 

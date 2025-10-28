@@ -119,28 +119,37 @@ class UDPSocketClass:
         """
         # TODO get send_addr
         packet, addr = self.reads.recvfrom(48000)
-        decrypt_data = self.pkse.decrypt(packet.decode("utf-8"), addr)
+        try:
+            decrypt_data = self.pkse.decrypt(packet, addr)
+        except Exception as e:
+            decrypt_data = packet
         logger.debug("recv {} -> asm decrypt msg: {} from {}".format(self.recv_port, decrypt_data, addr))
 
         try:
             unpacked_data = msgpack.unpackb(decrypt_data)
             msg_data = pyzstd.decompress(unpacked_data[0])
+            logger.debug(f"uncompressed data {msg_data}")
         except Exception as e:
-            msg_data = {}
+            logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
+            return
+
+        try:
+            msg_data = json.loads(msg_data.decode("utf-8"))
+            if "akey" in msg_data:
+                if "port" in msg_data:
+                    port = msg_data.get("port")
+                    addr = tuple([addr[0], port])
+                if not self.pkse.key_exists(addr):
+                    logger.info("pkse: new asm key {} for {}".format(msg_data.get("akey", False), addr))
+                    self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
+                    self.__send_akey(addr)
+                self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
+                return
+        except Exception as e:
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
-        if "akey" in msg_data:
-            if "port" in msg_data:
-                port = msg_data.get("port")
-                addr = tuple([addr[0], port])
-            if not self.pkse.key_exists(addr):
-                logger.info("pkse: new asm key {} for {}".format(msg_data.get("akey", False), addr))
-                self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
-                self.__send_akey(addr)
-            self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
-        else:
-            logger.debug("data to emmit: {}".format(msg_data.get("data")))
-            self.udp_recv_data.emit(msg_data, addr)
+        logger.debug("data to emmit: {}".format(msg_data.get("data")))
+        self.udp_recv_data.emit(msg_data, addr)
 
     def thread_read_socket(self):
         """funktion to start binding and listening on udp sockets
@@ -196,8 +205,8 @@ class UDPSocketClass:
         param addr: address to send key to
         type addr: tuple ip and port
         """
-        data_2_send = {"akey": self.pkse.public_key, "port": self.recv_port, "ign": ""}
-        self.__send(data_2_send, addr)
+        data_2_send = json.dumps({"akey": self.pkse.public_key, "port": self.recv_port, "ign": ""})
+        self.send_data(data_2_send, addr)
 
     def send_data(self, data_2_send, addr=None):
         """function to call from user of udp socket to send data
