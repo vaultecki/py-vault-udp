@@ -4,6 +4,7 @@ import random
 import math
 import logging
 import nacl.exceptions
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,8 @@ class VaultAsymmetricEncryption:
             self.set_private_key(private_key)
         else:
             self.generate_key()
-        # threading.Timer(random.randint(1, math.floor(self.__key_max_lifetime / 2)), self.__thread_clean_up).start()
+        self.cleanup_thread = threading.Thread(target=self.thread_clean_up, daemon=True)
+        self.cleanup_thread.start()
 
     def generate_key(self):
         """generates a new pair of private, public key
@@ -97,7 +99,6 @@ class VaultAsymmetricEncryption:
         :return: true if key exists, false if not
         :rtype: bool
         """
-        self.clean_up()
         return tuple(addr) in self.keys
 
     def set_private_key(self, private_key):
@@ -130,12 +131,15 @@ class VaultAsymmetricEncryption:
 
         try:
             text = vault_udp_socket_helper.decrypt_asym(self.__private_key, data)
-        except TypeError:
+        except nacl.exceptions.CryptoError as e:
+            logger.debug(
+                f"Asymmetrische Entschlüsselung für {addr} fehlgeschlagen (vermutlich unverschlüsselte Daten): {e}")
             text = data
-        except nacl.exceptions.InvalidkeyError:
+        except (TypeError, binascii.Error) as e:  # z.B. ungültiges Base64
+            logger.debug(f"Fehler bei Entschlüsselungs-Vorbereitung für {addr}: {e}")
             text = data
         except Exception as e:
-            logger.debug("asym decryption error: {}".format(e))
+            logger.debug(f"Allg. Entschlüsselungsfehler: {e}")
             text = data
         logger.info("vae: recv {}: text {}".format(addr, text))
         return text
