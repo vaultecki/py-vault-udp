@@ -24,33 +24,16 @@ def message_verify(public_key, message):
     return return_value
 
 
-def to_base64(msg):
-    if type(msg) is str:
-        return base64.b64encode(msg.encode('utf-8'))
-    if type(msg) is bytes:
-        return base64.b64encode(msg)
+def bytes_to_b64_str(data: bytes) -> str:
+    """Konvertiert bytes in einen Base64-codierten String."""
+    return base64.b64encode(data).decode('utf-8')
 
 
-def to_base64_str(msg):
-    if type(msg) is str:
-        return base64.b64encode(msg.encode('utf-8')).decode('utf-8')
-    if type(msg) is bytes:
-        return base64.b64encode(msg).decode('utf-8')
-
-
-def from_base64_byte(msg):
-    if type(msg) is str:
-        return base64.b64decode(msg)
-
-
-def from_base64_str(msg):
-    if type(msg) is str:
-        return base64.b64decode(msg).decode('utf-8')
-
-
-def to_binary(msg):
-    binary = base64.b64decode(msg)
-    return binary
+def b64_str_to_bytes(data: str) -> bytes:
+    """Konvertiert einen Base64-codierten String zurück in bytes."""
+    if isinstance(data, bytes):
+         data = data.decode('utf-8')
+    return base64.b64decode(data.encode('utf-8'))
 
 
 def generate_keys_asym():
@@ -60,8 +43,8 @@ def generate_keys_asym():
     :rtype: str, str
     """
     private_key = nacl.public.PrivateKey.generate()
-    public_key = to_base64_str(bytes(private_key.public_key))
-    private_key = to_base64_str(bytes(private_key))
+    public_key = bytes_to_b64_str(bytes(private_key.public_key))
+    private_key = bytes_to_b64_str(bytes(private_key))
     return public_key, private_key
 
 
@@ -74,8 +57,8 @@ def generate_public_key(private_key):
     return: return public key
     rtype: str
     """
-    private_key = nacl.public.PrivateKey(to_binary(private_key))
-    public_key = to_base64_str(bytes(private_key.public_key))
+    private_key = nacl.public.PrivateKey(b64_str_to_bytes(private_key))
+    public_key = bytes_to_b64_str(bytes(private_key.public_key))
     return public_key
 
 
@@ -94,7 +77,7 @@ def encrypt_asym(public_key, message):
         message = message.encode("utf-8")
     if not type(message) is bytes:
         raise TypeError
-    encrypt_box = nacl.public.SealedBox(nacl.public.PublicKey(to_binary(public_key)))
+    encrypt_box = nacl.public.SealedBox(nacl.public.PublicKey(b64_str_to_bytes(public_key)))
     encrypted = encrypt_box.encrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
     return encrypted
 
@@ -114,7 +97,7 @@ def decrypt_asym(private_key, message):
         message = message.encode("utf-8")
     if not type(message) is bytes:
         raise TypeError
-    decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(to_binary(private_key)))
+    decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(b64_str_to_bytes(private_key)))
     decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
     return decrypted
 
