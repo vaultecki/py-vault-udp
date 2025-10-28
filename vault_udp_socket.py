@@ -146,7 +146,7 @@ class UDPSocketClass:
         except Exception as e:
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
-        logger.debug("data to emmit: {}".format(msg_data.get("data")))
+        logger.debug("data to emmit: {}".format(decrypt_data))
         self.udp_recv_data.emit(msg_data, addr)
 
     def thread_read_socket(self):
