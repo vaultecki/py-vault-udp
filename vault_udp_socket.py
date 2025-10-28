@@ -175,11 +175,8 @@ class UDPSocketClass:
         logger.info("Thread closed normal")
 
     def __padding(self, length):
-        """create random string for padding data
-
-        param length: length of return bytes
-        type length: int
-
+        """create random BYTES for padding data
+        ...
         return: random bytes
         rtype: bytes
         """
