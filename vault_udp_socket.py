@@ -91,11 +91,22 @@ class UDPSocketClass:
             if recv_port_int > 65000:
                 recv_port_int = 65000
             if recv_port_int != self.recv_port:
-                self.recv_port = recv_port_int
-                if self.thread_started:
-                    self.thread_stop = True
+                logger.info(f"Neustart des Lese-Threads für Port {recv_port_int}")
+                # 1. Alten Thread signalisieren zu stoppen
+                self.thread_stop = True
+                # 2. Socket schließen, um recvfrom zu deblockieren
+                if self.reads:
                     self.reads.close()
-                    threading.Timer(self.timeout+3, self.thread_read_socket).start()
+                # 3. Warten, bis der alte Thread wirklich beendet ist
+                if self.read_thread and self.read_thread.is_alive():
+                    self.read_thread.join(timeout=2.0)  # Warten max. 2 Sek.
+                # 4. Port aktualisieren und Flag zurücksetzen
+                self.recv_port = recv_port_int
+                self.thread_stop = False  # WICHTIG: Flag zurücksetzen
+                # 5. Neuen Thread sauber starten
+                logger.info("Starte neuen Lese-Thread...")
+                self.read_thread = threading.Thread(target=self.thread_read_socket, daemon=True)
+                self.read_thread.start()
 
     def read_socket(self):
         """receive incoming data and opportunistic decrypt it
@@ -162,10 +173,8 @@ class UDPSocketClass:
         alphabet = "abcdefghijklmnopqrstuvwxyz"
         alphabet += alphabet.upper()
         alphabet += "0123456789.- +_?!^°§$%&/()=;:<>|"
-        return_string = ""
-        for number in range(length):
-            return_string += random.choice(alphabet)
-        return return_string
+
+        return "".join(random.choices(alphabet, k=length))
 
     def __thread_key_management(self):
         """key management - resend pkse keys and start ske key exchange if needed
