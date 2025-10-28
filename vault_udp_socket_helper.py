@@ -5,51 +5,6 @@ import nacl.public
 import nacl.secret
 import nacl.signing
 import nacl.utils
-import pynewhope.newhope
-
-
-def encrypt_sym(key, message):
-    """uses nacl symmetric encryption box to encrypt message
-
-    param key: secret for nacl box
-    type key: str
-    param message: message to encrypt
-    type message: str
-
-    return: returns base64 coded encrypted str
-    rtype: str
-    """
-    if type(message) is not str and type(message) is not bytes:
-        message = "{}".format(message)
-    if type(message) is str:
-        message = message.encode("utf-8")
-    if not type(message) is bytes:
-        raise TypeError
-    sym_hasher = nacl.hash.sha256
-    key_bytes = sym_hasher(key.encode("utf-8"), encoder=nacl.encoding.RawEncoder)
-    box = nacl.secret.SecretBox(key_bytes)
-    encrypted = bytes(box.encrypt(message))
-    encrypted_binary_str = base64.b64encode(encrypted).decode("utf-8")
-    return encrypted_binary_str
-
-
-def decrypt_sym(key, encrypted_binary_str):
-    """uses nacl symmetric encryption box to decrypt message
-
-    param key: secret for nacl box
-    type key: str
-    param encrypted_binary_str: base64 encoded encrypted message
-    type encrypted_binary_str: str
-
-    return: returns decrypted message
-    rtype: str
-    """
-    sym_hasher = nacl.hash.sha256
-    key_bytes = sym_hasher(key.encode("utf-8"), encoder=nacl.encoding.RawEncoder)
-    encrypted_bytes = base64.b64decode(encrypted_binary_str)
-    box = nacl.secret.SecretBox(key_bytes)
-    plaintext_str = box.decrypt(encrypted_bytes).decode("utf-8")
-    return plaintext_str
 
 
 def message_sign(private_key, message):
@@ -162,54 +117,6 @@ def decrypt_asym(private_key, message):
     decrypt_box = nacl.public.SealedBox(nacl.public.PrivateKey(to_binary(private_key)))
     decrypted = decrypt_box.decrypt(message, encoder=nacl.encoding.Base64Encoder).decode("utf-8")
     return decrypted
-
-
-def list_int_2_str(key):
-    # warning for testing only - do not use it for production
-    return_bytes = b''
-    for number in key:
-        # print("{} -> {}".format(number, hex(number)))
-        return_bytes += hex(number).encode("utf-8")
-    # print(return_bytes)
-    return to_base64_str(return_bytes)
-
-
-def str_to_list_int(base64_str):
-    # warning for testing only - do not use it for production
-    bytes_2_convert = from_base64_byte(base64_str)
-    # print(bytes_2_convert.decode("utf-8").split("0x")[1:])
-    list_integer = []
-    for i in bytes_2_convert.decode("utf-8").split("0x")[1:]:
-        list_integer.append(int(i, 16))
-    return list_integer
-
-
-def newhope_keygen():
-    # warning for testing only - do not use it for production
-    private_key, public_msg = pynewhope.newhope.keygen()
-    private_key = list_int_2_str(private_key)
-    public_msg = (list_int_2_str(public_msg[0]), to_base64_str(public_msg[1]))
-    return public_msg, private_key
-
-
-def newhope_shared_b(public_msg):
-    # warning for testing only - do not use it for production
-    public_msg = (str_to_list_int(public_msg[0]), from_base64_byte(public_msg[1]))
-    shared_key, public_msg = pynewhope.newhope.sharedB(public_msg)
-
-    public_msg = (list_int_2_str(public_msg[0]), list_int_2_str(public_msg[1]))
-    shared_key = list_int_2_str(shared_key)
-    return public_msg, shared_key
-
-
-def newhope_shared_a(public_msg, private_key):
-    # warning for testing only - do not use it for production
-    public_msg = (str_to_list_int(public_msg[0]), str_to_list_int(public_msg[1]))
-    private_key = (str_to_list_int(private_key))
-
-    shared_key = pynewhope.newhope.sharedA(public_msg, private_key)
-    shared_key = list_int_2_str(shared_key)
-    return shared_key
 
 
 if __name__ == '__main__':
