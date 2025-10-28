@@ -39,8 +39,12 @@ class UDPSocketClass:
         # public key encryption -> use nacl for keys and encryption
         self.pkse = vault_udp_encryption.VaultAsymmetricEncryption(lifetime=self.lifetime)
         self.udp_send_data.connect(self.send_data)
-        threading.Timer(0.25, self.thread_read_socket).start()
-        threading.Timer(5.0, self.__thread_key_management).start()
+
+        self.read_thread = threading.Thread(target=self.thread_read_socket, daemon=True)
+        self.read_thread.start()
+
+        self.key_mgmt_thread = threading.Thread(target=self.__thread_key_management, daemon=True)
+        self.key_mgmt_thread.start()
 
     def update_addr(self, addr=()):
         """update list of ip/port combinations to send packets to
@@ -133,10 +137,16 @@ class UDPSocketClass:
         while not self.thread_stop:
             try:
                 self.read_socket()
+            except socket.timeout:
+                # Timeout ist normal, einfach weitermachen
+                continue
             except Exception as e:
-                # logger.info("error read socket: {}".format(e))
-                # time.sleep(0.25)
-                pass
+                # Verhindert den Absturz des Threads
+                if self.thread_stop:
+                    # Gewollter Abbruch nach self.stop()
+                    break
+                #logger.error(f"Fehler in read_socket: {e}")
+                time.sleep(0.1)
         logger.info("Thread closed normal")
 
     def __padding(self, length):
