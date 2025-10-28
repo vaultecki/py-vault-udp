@@ -126,14 +126,6 @@ if __name__ == '__main__':
     hasher = nacl.hash.sha256
     secret = hasher(pw.encode("utf-8"), encoder=nacl.encoding.Base64Encoder).decode("utf-8")
 
-    # sym encryption
-    print("sym key: {}, type: {}".format(secret, type(secret)))
-    encrypted_text = encrypt_sym(secret, text)
-    print("text encrypted: {}, type:{}".format(encrypted_text, type(encrypted_text)))
-
-    decrypted_text = decrypt_sym(secret, encrypted_text)
-    print("decrypted text: {}, type: {}".format(decrypted_text, type(decrypted_text)))
-
     # asym encryption
     pub_key, private_key = generate_keys_asym()
     print("public key: {}, type: {}".format(pub_key, type(pub_key)))
@@ -145,24 +137,3 @@ if __name__ == '__main__':
     plaintext = decrypt_asym(private_key, encrypted_text)
     print("asym decrypted: {}, type: {}".format(plaintext, type(plaintext)))
 
-    # key exchange with newhope
-    print("new hope key exchange test")
-    public_msg, private_key = newhope_keygen()
-    print("new hope - len public msg: ({}, {}) and public msg: {}".format(len(public_msg[0]),
-                                                                          len(public_msg[1]), public_msg))
-    print("new hope types - public_msg: ({}, {}) -> {}".format(type(public_msg[0]),
-                                                               type(public_msg[1]), type(public_msg)))
-    public_msg_2, shared_key = newhope_shared_b(list(public_msg))
-    print("new hope - len public msg 2: ({}, {}) and public msg: {}".format(len(public_msg_2[0]),
-                                                                            len(public_msg_2[1]), public_msg_2))
-    print("new hope types - public_msg 2: ({}, {}) -> {}".format(type(public_msg_2[0]),
-                                                                 type(public_msg_2[1]), type(public_msg_2)))
-
-    shared_key_2 = newhope_shared_a(public_msg_2, private_key)
-    print("new hope shared_key 1: {} -> type {}".format(shared_key, type(shared_key)))
-    print("new hope shared_key 2: {} -> type {}".format(shared_key_2, type(shared_key_2)))
-
-    encrypted_text = encrypt_sym(shared_key, text)
-    print(encrypted_text)
-    decrypted_text = decrypt_sym(shared_key_2, encrypted_text)
-    print(decrypted_text)
