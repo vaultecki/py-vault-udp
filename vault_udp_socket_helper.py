@@ -7,23 +7,6 @@ import nacl.signing
 import nacl.utils
 
 
-def message_sign(private_key, message):
-    signing_key = nacl.signing.SigningKey(private_key.encode())
-    signed = signing_key.sign(message)
-    return signed
-
-
-def message_verify(public_key, message):
-    verify_key = nacl.signing.VerifyKey(public_key.encode())
-    return_value = 1
-    try:
-        verify_key.verify(message)
-    except Exception as e:
-        print("Error {}".format(e))
-        return_value = False
-    return return_value
-
-
 def bytes_to_b64_str(data: bytes) -> str:
     """Konvertiert bytes in einen Base64-codierten String."""
     return base64.b64encode(data).decode('utf-8')
