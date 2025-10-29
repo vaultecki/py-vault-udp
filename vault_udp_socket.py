@@ -32,7 +32,7 @@ class UDPSocketClass:
 
     def __init__(self, recv_port=11000):
         self.recv_port = recv_port  # where do you expect to get a msg?
-        self.mtu = vault_ip.get_min_mtu() - 1
+        self.mtu = vault_ip.get_min_mtu() - 10
         self.mask_addresses = []
         self.reads = None
         self.writes = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -215,8 +215,8 @@ class UDPSocketClass:
         """function to call from user of udp socket to send data
            prepares data
 
-        param str_to_send: string to send
-        type str_to_send: str
+        param str_to_send: data to send
+        type str_to_send: str or bytes
         param addr: addr to send to - None for to all known
         type addr: tuple ip and port
         """
@@ -232,8 +232,8 @@ class UDPSocketClass:
         """ internal send method, applies opportunistic encryption before sending data over udp
             applies padding to data to get equal length
 
-        param dict_data: data to send
-        type dict_data: dict
+        param data: data to send
+        type data: bytes
         param addr: addr to send data to
         type addr: tuple ip and port
         """
