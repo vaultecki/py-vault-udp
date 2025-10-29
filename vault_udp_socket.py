@@ -127,29 +127,37 @@ class UDPSocketClass:
 
         try:
             unpacked_data = msgpack.unpackb(decrypt_data)
-            msg_data = pyzstd.decompress(unpacked_data[0])
-            logger.debug(f"uncompressed data {msg_data}")
+            payload_bytes = pyzstd.decompress(unpacked_data[0])
+            logger.debug(f"uncompressed data {payload_bytes}")
         except Exception as e:
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
             return
 
         try:
-            msg_data = json.loads(msg_data.decode("utf-8"))
-            if "akey" in msg_data:
-                if "port" in msg_data:
-                    port = msg_data.get("port")
+            msg_data_dict = json.loads(payload_bytes.decode("utf-8"))
+            if "akey" in msg_data_dict:
+                if "port" in msg_data_dict:
+                    port = msg_data_dict.get("port")
                     addr = tuple([addr[0], port])
                 if not self.pkse.key_exists(addr):
-                    logger.info("pkse: new asm key {} for {}".format(msg_data.get("akey", False), addr))
-                    self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
+                    logger.info("pkse: new asm key {} for {}".format(msg_data_dict.get("akey", False), addr))
+                    self.pkse.update_key(tuple(addr), msg_data_dict.get("akey", False))
                     self.__send_akey(addr)
-                self.pkse.update_key(tuple(addr), msg_data.get("akey", False))
+                self.pkse.update_key(tuple(addr), msg_data_dict.get("akey", False))
                 return
-        except Exception as e:
-            logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
 
-        logger.debug("data to emmit: {}".format(decrypt_data))
-        self.udp_recv_data.emit(msg_data, addr)
+        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+            try:
+                data_str = payload_bytes.decode('utf-8')
+                logger.debug("data to emmit: {}".format(data_str))
+                self.udp_recv_data.emit(data_str, addr)  # String emitten
+            except UnicodeDecodeError:
+                logger.warning(f"Received data from {addr} was not valid UTF-8.")
+            return
+
+        if "data" in msg_data_dict:
+            logger.debug("data to emmit: {}".format(msg_data_dict.get("data")))
+            self.udp_recv_data.emit(msg_data_dict.get("data"), addr)
 
     def thread_read_socket(self):
         """funktion to start binding and listening on udp sockets

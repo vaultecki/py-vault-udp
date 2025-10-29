@@ -91,7 +91,7 @@ class VaultAsymmetricEncryption:
         """
         key_list = list(self.keys.keys())
         for key in key_list:
-            if ip in key[0]:
+            if ip == key[0]:
                 return key
         return False
 
