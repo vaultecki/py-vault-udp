@@ -238,7 +238,7 @@ class UDPSocketClass:
         type addr: tuple ip and port
         """
         logger.debug("{} -> {}: data to send: {}".format(self.recv_port, addr, data))
-        packed_data = msgpack.packb([data])
+        packed_data = msgpack.packb([data, b""])
         if len(packed_data) > self.mtu:
             raise ValueError("msg to long")
 
