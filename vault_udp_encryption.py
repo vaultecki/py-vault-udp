@@ -1,6 +1,6 @@
 import binascii
 
-import vault_udp_socket_helper
+from .vault_udp_socket_helper import generate_keys_asym, generate_public_key, decrypt_asym, encrypt_asym
 import time
 import random
 import math
@@ -34,7 +34,7 @@ class VaultAsymmetricEncryption:
         :rtype: str
         """
         logger.info("generate new keys for vae")
-        public_key, private_key = vault_udp_socket_helper.generate_keys_asym()
+        public_key, private_key = generate_keys_asym()
         self.set_private_key(private_key)
         return self.public_key
 
@@ -113,7 +113,7 @@ class VaultAsymmetricEncryption:
         """
         logger.debug("vae: set private key: {}".format(private_key))
         self.__private_key = private_key
-        self.public_key = vault_udp_socket_helper.generate_public_key(self.__private_key)
+        self.public_key = generate_public_key(self.__private_key)
         return self.public_key
 
     def decrypt(self, data, addr):
@@ -133,7 +133,7 @@ class VaultAsymmetricEncryption:
 
         try:
             # 'data' sind die rohen Bytes vom Socket
-            text_bytes = vault_udp_socket_helper.decrypt_asym(self.__private_key, data)
+            text_bytes = decrypt_asym(self.__private_key, data)
         except nacl.exceptions.CryptoError as e:
             logger.debug(f"Entschlüsselung fehlgeschlagen: {e}")
             # Wenn Entschlüsselung fehlschlägt, ist 'data' vielleicht unverschlüsselt
@@ -163,7 +163,7 @@ class VaultAsymmetricEncryption:
         if not self.keys.get(tuple(addr), False):
             return data
 
-        text = vault_udp_socket_helper.encrypt_asym(self.keys.get(tuple(addr)), data)
+        text = encrypt_asym(self.keys.get(tuple(addr)), data)
         logger.debug("vae: encrypted {}: str {}".format(addr, text))
         return text
 
