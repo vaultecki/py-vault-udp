@@ -1,5 +1,4 @@
 import os
-
 from .vault_ip import get_ips, get_min_mtu
 from .vault_udp_encryption import VaultAsymmetricEncryption
 import json
@@ -127,15 +126,21 @@ class UDPSocketClass:
 
         try:
             unpacked_data = msgpack.unpackb(decrypt_data)
-            payload_bytes = pyzstd.decompress(unpacked_data[0])
-            control_bytes = unpacked_data[1]
+            payload_bytes = b""
+            if unpacked_data[0] != b"":
+                payload_bytes = pyzstd.decompress(unpacked_data[0])
+            control_bytes = b""
+            if unpacked_data[1] != b"":
+                control_bytes = pyzstd.decompress(unpacked_data[1])
             logger.debug(f"uncompressed data {payload_bytes}")
         except Exception as e:
             logger.debug("error unpacking packet {}: {}".format(decrypt_data, e))
             return
 
-        self.udp_recv_data.emit(payload_bytes)
+        self.udp_recv_data.emit(payload_bytes, addr)
 
+        if control_bytes == b"":
+            return
         try:
             control_dict = json.loads(control_bytes.decode("utf-8"))
             if "akey" in control_dict:
@@ -148,10 +153,9 @@ class UDPSocketClass:
                     self.__send_akey(addr)
                 self.pkse.update_key(tuple(addr), control_dict.get("akey", False))
                 return
-
         except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-            logger.warning(f"miss formated control data from {addr}.")
-            return
+            logger.warning(f"miss formated control data {control_bytes} from {addr}.")
+
 
     def thread_read_socket(self):
         """funktion to start binding and listening on udp sockets
@@ -202,11 +206,12 @@ class UDPSocketClass:
         param addr: address to send key to
         type addr: tuple ip and port
         """
+        logger.debug("send out key update")
         data_2_send = json.dumps({"akey": self.pkse.public_key, "port": self.recv_port, "ign": ""})
         if isinstance(data_2_send, str):
             data_2_send = data_2_send.encode("utf-8")
-        #compressed_data = pyzstd.compress(data_2_send, 16)
-        self.__send(control_data=data_2_send, addr=addr)
+        compressed_data = pyzstd.compress(data_2_send, 16)
+        self.__send(control_data=compressed_data, addr=addr)
 
     def send_data(self, data_2_send, addr=None):
         """function to call from user of udp socket to send data
