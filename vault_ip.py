@@ -26,21 +26,23 @@ def get_min_mtu():
 
 
 def get_ips():
-    result4 = []
+    h_name = socket.gethostname()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))
+        result4 = s.getsockname()[0]
+    except Exception as e:
+        logger.warning("Get IP Error {} - using 127.0.0.1".format(e))
+        result4 = '127.0.0.1'
+    finally:
+        s.close()
+    result6raw = socket.getaddrinfo(h_name, 0, socket.AF_INET6)
     result6 = []
-    interface_data = psutil.net_if_stats()
-    for interface, stats in interface_data.items():
-        if stats.isup and not interface.lower().startswith('lo'):
-            logger.debug("network interface: {} got following properties: {}".format(interface, stats))
-            interface_addr = psutil.net_if_addrs().get(interface)
-            for snic_addr in interface_addr:
-                if snic_addr.family == socket.AF_INET:
-                    result4.append(snic_addr.address)
-                if snic_addr.family == socket.AF_INET6:
-                    result6.append(snic_addr.address)
-        else:
-            logger.debug(f"Skipping interface {interface} (isup: {stats.isup})")
-    return [result4, result6]
+    for ipv6 in result6raw:
+        result6.append(ipv6[4][0])
+    result6 = list(dict.fromkeys(result6))
+    logger.debug("Return IPs {} and {}".format(result4, result6))
+    return [[result4], result6]
 
 
 if __name__ == "__main__":
