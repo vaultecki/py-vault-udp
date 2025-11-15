@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 # Constants
 DEFAULT_MTU = 1500
 FALLBACK_IPV4 = '127.0.0.1'
-GOOGLE_DNS_SERVER = '8.8.8.8'
-GOOGLE_DNS_PORT = 53
 
 
 class NetworkError(Exception):
@@ -86,17 +84,17 @@ def get_min_mtu() -> int:
     return min_mtu
 
 
-def get_ipv4_address() -> str:
+def get_ipv4_addresses() -> List[str]:
     """
-    Get the primary IPv4 address of this machine.
+    Get all IPv4 addresses of this machine from active interfaces.
 
     Returns:
-        IPv4 address as string
+        List of IPv4 addresses (at least one, may contain 127.0.0.1 as fallback)
 
     Note:
-        Uses psutil to get addresses from active network interfaces.
-        Prefers non-loopback addresses. Falls back to 127.0.0.1 if 
-        no other address is found.
+        - Excludes loopback interfaces unless no other address is found
+        - Excludes link-local addresses (169.254.x.x)
+        - Only considers interfaces that are up
     """
     try:
         if_addrs = psutil.net_if_addrs()
@@ -104,13 +102,13 @@ def get_ipv4_address() -> str:
     except Exception as e:
         logger.error("Failed to get network interfaces: %s", e)
         logger.warning("Using fallback IPv4: %s", FALLBACK_IPV4)
-        return FALLBACK_IPV4
+        return [FALLBACK_IPV4]
 
-    # Collect all IPv4 addresses with priority
+    # Collect all IPv4 addresses
     addresses = []
 
     for interface_name, addr_list in if_addrs.items():
-        # Skip loopback interfaces
+        # Skip loopback interfaces (we'll add it as fallback if needed)
         if interface_name.lower().startswith('lo'):
             continue
 
@@ -128,14 +126,12 @@ def get_ipv4_address() -> str:
                     logger.debug("Found IPv4 address %s on %s", ip, interface_name)
 
     if addresses:
-        # Return the first non-loopback address
-        ipv4_address = addresses[0]
-        logger.debug("Selected primary IPv4 address: %s", ipv4_address)
-        return ipv4_address
+        logger.info("Found %d IPv4 addresses", len(addresses))
+        return addresses
 
     # No non-loopback address found, use fallback
-    logger.warning("No active IPv4 address found, using fallback: %s", FALLBACK_IPV4)
-    return FALLBACK_IPV4
+    logger.warning("No active IPv4 addresses found, using fallback: %s", FALLBACK_IPV4)
+    return [FALLBACK_IPV4]
 
 
 def get_ipv6_addresses() -> List[str]:
@@ -195,13 +191,15 @@ def get_ip_addresses() -> Tuple[List[str], List[str]]:
     Note:
         - IPv4 list always contains at least one address (may be 127.0.0.1)
         - IPv6 list may be empty if IPv6 is not available
+        - Compatible with original get_ips() function
     """
-    ipv4 = get_ipv4_address()
+    ipv4_list = get_ipv4_addresses()
     ipv6_list = get_ipv6_addresses()
 
-    logger.info("IP addresses: IPv4=%s, IPv6 count=%d", ipv4, len(ipv6_list))
+    logger.info("IP addresses: IPv4 count=%d, IPv6 count=%d",
+                len(ipv4_list), len(ipv6_list))
 
-    return ([ipv4], ipv6_list)
+    return (ipv4_list, ipv6_list)
 
 
 def get_all_interface_addresses() -> dict:
@@ -318,10 +316,12 @@ def main():
     print(f"Minimum MTU: {mtu} bytes")
 
     # Get IPv4
-    print("\n--- IPv4 Address ---")
-    ipv4 = get_ipv4_address()
-    print(f"Primary IPv4: {ipv4}")
-    print(f"Valid IPv4: {is_ipv4_valid(ipv4)}")
+    print("\n--- IPv4 Addresses ---")
+    ipv4_list = get_ipv4_addresses()
+    print(f"Found {len(ipv4_list)} IPv4 address(es):")
+    for i, addr in enumerate(ipv4_list, 1):
+        print(f"{i}. {addr}")
+        print(f"   Valid: {is_ipv4_valid(addr)}")
 
     # Get IPv6
     print("\n--- IPv6 Addresses ---")
