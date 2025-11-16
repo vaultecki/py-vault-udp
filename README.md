@@ -10,6 +10,7 @@ Python UDP communication library with opporunistic encryption, authenticated enc
 - 🛡️ **Replay Attack Prevention**: Automatic nonce tracking and message timestamp verification
 - 🔑 **Automatic Key Exchange**: Seamless public key distribution with signature verification
 - ⏰ **Key Lifecycle Management**: Automatic expiration and cleanup of old keys
+- ⚠️ **Warning**: opportunistic encryption, fallback is unencrypted UDP
 
 ### Performance
 - 📦 **Message Compression**: Zstd compression for reduced bandwidth
