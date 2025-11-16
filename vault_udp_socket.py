@@ -6,11 +6,15 @@ Vault UDP Socket Module
 
 Provides bidirectional UDP communication with authenticated encryption,
 automatic key exchange, message compression, and rate limiting.
+
+Protocol Version 2:
+- Stricter separation of control and payload data
+- Version field for future compatibility
+- Structured msgpack format: {'v': version, 'p': payload, 'c': control, 'g': padding}
 """
 
 import json
 import logging
-import math
 import os
 import random
 import socket
@@ -29,6 +33,9 @@ import vault_udp_socket_helper
 
 logger = logging.getLogger(__name__)
 
+# Protocol version
+PROTOCOL_VERSION = 2
+
 # Constants
 DEFAULT_RECV_PORT = 11000
 MIN_PORT = 1500
@@ -38,7 +45,7 @@ MAX_PORT = 65000
 IP_HEADER_SIZE = 20  # IPv4 (IPv6 would be 40)
 UDP_HEADER_SIZE = 8
 NACL_BOX_OVERHEAD = 40  # Box overhead (24 nonce + 16 authenticator)
-MSGPACK_OVERHEAD = 10
+MSGPACK_OVERHEAD = 15  # Increased for structured format
 REPLAY_PROTECTION_OVERHEAD = 24  # 16 bytes nonce + 8 bytes timestamp
 
 DEFAULT_KEY_LIFETIME = 60
@@ -65,6 +72,11 @@ class InvalidPortError(UDPSocketError):
 
 class RateLimitExceededError(UDPSocketError):
     """Raised when rate limit is exceeded."""
+    pass
+
+
+class ProtocolVersionError(UDPSocketError):
+    """Raised when unsupported protocol version is encountered."""
     pass
 
 
@@ -128,14 +140,17 @@ class UDPSocketClass:
     """
     Bidirectional UDP socket with authenticated encryption and rate limiting.
 
-    Features:
+    Protocol v2 Features:
+    - Versioned protocol for future compatibility
+    - Strict separation of control channel (key exchange) and payload channel (user data)
+    - Structured msgpack format with dedicated fields
+
+    Security Features:
     - Authenticated asymmetric encryption with replay protection
     - Automatic key exchange with signature verification
     - Message compression (zstd)
     - Rate limiting per peer
     - Thread-safe operations
-    - Multiple peers support (multiple peers per IP allowed)
-    - PySignal integration for events
 
     Signals:
         udp_recv_data: Emitted when user data is received (data: str, addr: tuple)
@@ -149,9 +164,9 @@ class UDPSocketClass:
     udp_send_data = PySignal.ClassSignal()
 
     def __init__(
-        self,
-        recv_port: int = DEFAULT_RECV_PORT,
-        rate_limit: int = DEFAULT_RATE_LIMIT
+            self,
+            recv_port: int = DEFAULT_RECV_PORT,
+            rate_limit: int = DEFAULT_RATE_LIMIT
     ):
         """
         Initialize UDP socket.
@@ -160,7 +175,7 @@ class UDPSocketClass:
             recv_port: Port to listen on for incoming messages
             rate_limit: Maximum messages per second per peer
         """
-        logger.info("Initializing UDPSocketClass on port %d", recv_port)
+        logger.info("Initializing UDPSocketClass v%d on port %d", PROTOCOL_VERSION, recv_port)
 
         # Port configuration
         self.recv_port = self._validate_port(recv_port)
@@ -168,7 +183,7 @@ class UDPSocketClass:
         # Network configuration with proper MTU calculation
         base_mtu = vault_ip.get_min_mtu()
         total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + NACL_BOX_OVERHEAD +
-                         MSGPACK_OVERHEAD + REPLAY_PROTECTION_OVERHEAD)
+                          MSGPACK_OVERHEAD + REPLAY_PROTECTION_OVERHEAD)
         self.mtu = base_mtu - total_overhead
         logger.info("Base MTU: %d, Effective MTU: %d bytes", base_mtu, self.mtu)
 
@@ -333,7 +348,7 @@ class UDPSocketClass:
 
     def send_data(self, data: Any, addr: Optional[Tuple[str, int]] = None) -> None:
         """
-        Send data to peer(s).
+        Send user data to peer(s) via payload channel.
 
         Args:
             data: Data to send (str or bytes)
@@ -356,13 +371,13 @@ class UDPSocketClass:
             compressed_data = pyzstd.compress(data_bytes, 16)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Compressed %d bytes to %d bytes",
-                            len(data_bytes), len(compressed_data))
+                             len(data_bytes), len(compressed_data))
         except Exception as e:
             logger.error("Compression failed: %s", e)
             raise UDPSocketError(f"Compression failed: {e}") from e
 
-        # Send
-        self._send_internal(compressed_data, addr)
+        # Send via payload channel (control is empty)
+        self._send_internal(compressed_data, b'', addr)
 
     def stop(self, timeout: float = 5.0) -> None:
         """
@@ -421,6 +436,7 @@ class UDPSocketClass:
                 peers_by_ip[ip].append(port)
 
             return {
+                'protocol_version': PROTOCOL_VERSION,
                 'recv_port': self.recv_port,
                 'mtu': self.mtu,
                 'peer_count': len(self._peer_addresses),
@@ -429,9 +445,9 @@ class UDPSocketClass:
                 'peers_by_ip': peers_by_ip,
                 'encryption_stats': self._encryption.get_stats(),
                 'enc_public_key': self._encryption.enc_public_key[:32] + "..."
-                                 if self._encryption.enc_public_key else None,
+                if self._encryption.enc_public_key else None,
                 'sign_public_key': self._encryption.sign_public_key[:32] + "..."
-                                  if self._encryption.sign_public_key else None
+                if self._encryption.sign_public_key else None
             }
 
     # Private methods
@@ -509,54 +525,94 @@ class UDPSocketClass:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
 
-        # Unpack msgpack
+        # Unpack msgpack - handle both v1 (list) and v2 (dict) formats
         try:
             unpacked_data = msgpack.unpackb(decrypted_data)
-            if not isinstance(unpacked_data, (list, tuple)) or len(unpacked_data) < 1:
+
+            # Check if it's v2 format (dict with 'v' field)
+            if isinstance(unpacked_data, dict) and 'v' in unpacked_data:
+                self._process_v2_packet(unpacked_data, addr)
+            else:
                 logger.warning("Invalid msgpack structure from %s", addr)
                 return
 
-            payload_compressed = unpacked_data[0]
         except Exception as e:
             logger.debug("Failed to unpack msgpack from %s: %s", addr, e)
             return
 
+    def _process_v2_packet(self, packet: dict, addr: Tuple[str, int]) -> None:
+        """
+        Process protocol v2 packet.
+
+        Args:
+            packet: Dict with keys 'v' (version), 'p' (payload), 'c' (control), 'g' (padding)
+            addr: Sender address
+        """
+        version = packet.get('v', 0)
+
+        if version != PROTOCOL_VERSION:
+            logger.warning("Unsupported protocol version %d from %s (expected %d)",
+                           version, addr, PROTOCOL_VERSION)
+            return
+
+        # Extract control and payload
+        control_data = packet.get('c', b'')
+        payload_data = packet.get('p', b'')
+
+        # Process control channel (key exchange)
+        if control_data:
+            self._process_control_channel(control_data, addr)
+
+        # Process payload channel (user data)
+        if payload_data:
+            self._process_payload_channel(payload_data, addr)
+
+    def _process_control_channel(self, control_data: bytes, addr: Tuple[str, int]) -> None:
+        """
+        Process control channel data (key exchange).
+
+        Args:
+            control_data: Control channel bytes
+            addr: Sender address
+        """
+        try:
+            # Control data is JSON
+            msg_dict = json.loads(control_data.decode("utf-8"))
+
+            if "enc_key" in msg_dict and "sign_key" in msg_dict:
+                self._handle_key_exchange(msg_dict, addr)
+            else:
+                logger.warning("Unknown control message from %s", addr)
+
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning("Invalid control data from %s: %s", addr, e)
+
+    def _process_payload_channel(self, payload_data: bytes, addr: Tuple[str, int]) -> None:
+        """
+        Process payload channel data (user data).
+
+        Args:
+            payload_data: Compressed payload bytes
+            addr: Sender address
+        """
         # Decompress
         try:
-            payload_bytes = pyzstd.decompress(payload_compressed)
+            decompressed = pyzstd.decompress(payload_data)
         except Exception as e:
-            logger.debug("Failed to decompress data from %s: %s", addr, e)
+            logger.debug("Failed to decompress payload from %s: %s", addr, e)
             return
 
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Decompressed to %d bytes", len(payload_bytes))
+            logger.debug("Decompressed payload to %d bytes", len(decompressed))
 
-        # Try to parse as JSON for key exchange
+        # Try to decode as string
         try:
-            msg_dict = json.loads(payload_bytes.decode("utf-8"))
-
-            # Handle key exchange
-            if "enc_key" in msg_dict and "sign_key" in msg_dict:
-                self._handle_key_exchange(msg_dict, addr)
-                return
-
-            # Handle user data in JSON format
-            if "data" in msg_dict:
-                user_data = msg_dict["data"]
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Emitting user data from %s", addr)
-                self.udp_recv_data.emit(user_data, addr)
-                return
-
-        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-            # Not JSON, treat as plain string
-            try:
-                data_str = payload_bytes.decode('utf-8')
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Emitting plain string from %s", addr)
-                self.udp_recv_data.emit(data_str, addr)
-            except UnicodeDecodeError:
-                logger.warning("Received non-UTF-8 data from %s", addr)
+            data_str = decompressed.decode('utf-8')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Emitting user data from %s", addr)
+            self.udp_recv_data.emit(data_str, addr)
+        except UnicodeDecodeError:
+            logger.warning("Received non-UTF-8 payload from %s", addr)
 
     def _handle_key_exchange(self, msg_dict: dict, addr: Tuple[str, int]) -> None:
         """
@@ -589,7 +645,8 @@ class UDPSocketClass:
 
                 # Verify using the sign_key from the message
                 vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
-                logger.debug("Signature verified for %s", addr)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Signature verified for %s", addr)
             except vault_udp_socket_helper.SignatureError:
                 logger.warning("Invalid signature from %s, rejecting keys", addr)
                 return
@@ -641,14 +698,14 @@ class UDPSocketClass:
 
     def _send_public_keys(self, addr: Tuple[str, int]) -> None:
         """
-        Send our public keys to a peer with signature.
+        Send our public keys to a peer with signature via control channel.
 
         Args:
             addr: Target address
         """
         # Create signature over our keys
         keys_data = (self._encryption.enc_public_key +
-                    self._encryption.sign_public_key).encode('utf-8')
+                     self._encryption.sign_public_key).encode('utf-8')
 
         try:
             signed_data = vault_udp_socket_helper.sign_message(
@@ -664,35 +721,42 @@ class UDPSocketClass:
             "enc_key": self._encryption.enc_public_key,
             "sign_key": self._encryption.sign_public_key,
             "signature": signature,
-            "port": self.recv_port,
-            "ign": ""
+            "port": self.recv_port
         }
 
         try:
-            json_data = json.dumps(key_data)
-            self.send_data(json_data, addr)
+            # Send via control channel (payload is empty)
+            json_data = json.dumps(key_data).encode("utf-8")
+            self._send_internal(b'', json_data, addr)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Sent public keys to %s", addr)
         except Exception as e:
             logger.error("Failed to send public keys to %s: %s", addr, e)
 
     def _send_internal(
-        self,
-        data: bytes,
-        addr: Optional[Tuple[str, int]] = None
+            self,
+            payload: bytes,
+            control: bytes,
+            addr: Optional[Tuple[str, int]] = None
     ) -> None:
         """
-        Internal send method with encryption and padding.
+        Internal send method with encryption and padding (protocol v2).
 
         Args:
-            data: Compressed data to send
+            payload: Compressed user data (or empty for control-only)
+            control: Control data like key exchange (or empty for payload-only)
             addr: Target address, or None for all peers
 
         Raises:
             MessageTooLargeError: If message exceeds MTU
         """
-        # Pack data with msgpack (reserve space for padding)
-        packed_data = msgpack.packb([data, b""])
+        # Pack data with msgpack v2 format (reserve space for padding)
+        packed_data = msgpack.packb({
+            'v': PROTOCOL_VERSION,
+            'p': payload,
+            'c': control,
+            'g': b''
+        })
 
         if len(packed_data) > self.mtu:
             raise MessageTooLargeError(
@@ -702,7 +766,12 @@ class UDPSocketClass:
         # Add padding to reach MTU
         padding_size = self.mtu - len(packed_data)
         padding = self._generate_padding(padding_size)
-        packed_data = msgpack.packb([data, padding])
+        packed_data = msgpack.packb({
+            'v': PROTOCOL_VERSION,
+            'p': payload,
+            'c': control,
+            'g': padding
+        })
 
         # Determine target addresses
         with self._lock:
@@ -789,7 +858,9 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    print("Creating UDP sockets with authenticated encryption...")
+    print("=" * 70)
+    print(f"Creating UDP sockets with protocol v{PROTOCOL_VERSION}")
+    print("=" * 70)
 
     # Create first socket with multiple peers on same IP
     with UDPSocketClass(11000) as socket1:
@@ -797,15 +868,19 @@ def main():
         socket1.add_peer(("127.0.0.1", 8001))
         socket1.add_peer(("127.0.0.1", 8002))
         socket1.udp_recv_data.connect(print_received_data)
-        print(f"Socket 1 stats: {socket1.get_stats()}")
+
+        stats = socket1.get_stats()
+        print(f"\nSocket 1 stats:")
+        print(f"  Protocol version: {stats['protocol_version']}")
+        print(f"  Peers: {stats['peer_count']}")
+        print(f"  MTU: {stats['mtu']}")
 
         time.sleep(1)
 
         # Create three sockets listening on different ports
         with UDPSocketClass(8000) as socket2, \
-             UDPSocketClass(8001) as socket3, \
-             UDPSocketClass(8002) as socket4:
-
+                UDPSocketClass(8001) as socket3, \
+                UDPSocketClass(8002) as socket4:
             socket2.add_peer(("127.0.0.1", 11000))
             socket3.add_peer(("127.0.0.1", 11000))
             socket4.add_peer(("127.0.0.1", 11000))
@@ -814,9 +889,10 @@ def main():
             socket3.udp_recv_data.connect(print_received_data)
             socket4.udp_recv_data.connect(print_received_data)
 
-            print(f"Socket 2 stats: {socket2.get_stats()}")
+            print(f"\nSocket 2 protocol version: {socket2.get_stats()['protocol_version']}")
 
             # Wait for key exchange
+            print("\nWaiting for key exchange...")
             time.sleep(3)
 
             # Send test messages
@@ -830,7 +906,13 @@ def main():
             socket4.send_data("Response from port 8002")
             time.sleep(1)
 
-            print("\nTest complete!")
+            print("\n--- Testing binary data ---")
+            socket1.send_data(b"Binary data test")
+            time.sleep(1)
+
+            print("\n" + "=" * 70)
+            print("Test complete!")
+            print("=" * 70)
 
 
 if __name__ == '__main__':
