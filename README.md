@@ -1,6 +1,6 @@
 # py-vault-udp
 
-Secure Python UDP communication library with authenticated encryption, automatic key exchange, and replay attack prevention.
+Python UDP communication library with opporunistic encryption, authenticated encryption, automatic key exchange, and replay attack prevention.
 
 ## Features
 
