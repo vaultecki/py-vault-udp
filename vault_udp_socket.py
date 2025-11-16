@@ -1,8 +1,11 @@
+# Copyright [2025] [ecki]
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Vault UDP Socket Module
 
-Provides bidirectional UDP communication with opportunistic encryption,
-automatic key exchange, and message compression.
+Provides bidirectional UDP communication with authenticated encryption,
+automatic key exchange, message compression, and rate limiting.
 """
 
 import json
@@ -13,7 +16,8 @@ import random
 import socket
 import threading
 import time
-from typing import Optional, Tuple, List, Callable, Any
+from collections import defaultdict
+from typing import Optional, Tuple, List, Any, Dict
 
 import msgpack
 import PySignal
@@ -21,6 +25,7 @@ import pyzstd
 
 import vault_ip
 import vault_udp_encryption
+import vault_udp_socket_helper
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +33,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECV_PORT = 11000
 MIN_PORT = 1500
 MAX_PORT = 65000
-MTU_OVERHEAD = 10
+
+# MTU calculation with proper overhead
+IP_HEADER_SIZE = 20  # IPv4 (IPv6 would be 40)
+UDP_HEADER_SIZE = 8
+NACL_BOX_OVERHEAD = 40  # Box overhead (24 nonce + 16 authenticator)
+MSGPACK_OVERHEAD = 10
+REPLAY_PROTECTION_OVERHEAD = 24  # 16 bytes nonce + 8 bytes timestamp
+
 DEFAULT_KEY_LIFETIME = 60
 KEY_MGMT_MIN_INTERVAL = 5
+
+# Rate limiting
+DEFAULT_RATE_LIMIT = 100  # messages per second per peer
 
 
 class UDPSocketError(Exception):
@@ -48,13 +63,76 @@ class InvalidPortError(UDPSocketError):
     pass
 
 
+class RateLimitExceededError(UDPSocketError):
+    """Raised when rate limit is exceeded."""
+    pass
+
+
+class RateLimiter:
+    """Simple token bucket rate limiter."""
+
+    def __init__(self, max_per_second: int = DEFAULT_RATE_LIMIT):
+        """
+        Initialize rate limiter.
+
+        Args:
+            max_per_second: Maximum messages per second per peer
+        """
+        self._max_per_second = max_per_second
+        self._requests: Dict[Tuple[str, int], List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def allow_request(self, addr: Tuple[str, int]) -> bool:
+        """
+        Check if request from addr should be allowed.
+
+        Args:
+            addr: Peer address
+
+        Returns:
+            True if allowed, False if rate limited
+        """
+        now = time.time()
+
+        with self._lock:
+            # Remove entries older than 1 second
+            self._requests[addr] = [
+                t for t in self._requests[addr]
+                if now - t < 1.0
+            ]
+
+            # Check limit
+            if len(self._requests[addr]) >= self._max_per_second:
+                return False
+
+            # Add new request
+            self._requests[addr].append(now)
+            return True
+
+    def cleanup_old_entries(self) -> None:
+        """Remove old entries to prevent memory growth."""
+        now = time.time()
+
+        with self._lock:
+            # Remove peers with no recent activity
+            inactive_peers = [
+                addr for addr, times in self._requests.items()
+                if not times or (now - max(times) > 60.0)
+            ]
+
+            for addr in inactive_peers:
+                del self._requests[addr]
+
+
 class UDPSocketClass:
     """
-    Bidirectional UDP socket with opportunistic encryption.
+    Bidirectional UDP socket with authenticated encryption and rate limiting.
 
     Features:
-    - Automatic asymmetric key exchange
+    - Authenticated asymmetric encryption with replay protection
+    - Automatic key exchange with signature verification
     - Message compression (zstd)
+    - Rate limiting per peer
     - Thread-safe operations
     - Multiple peers support (multiple peers per IP allowed)
     - PySignal integration for events
@@ -70,28 +148,39 @@ class UDPSocketClass:
     udp_recv_data = PySignal.ClassSignal()
     udp_send_data = PySignal.ClassSignal()
 
-    def __init__(self, recv_port: int = DEFAULT_RECV_PORT):
+    def __init__(
+        self,
+        recv_port: int = DEFAULT_RECV_PORT,
+        rate_limit: int = DEFAULT_RATE_LIMIT
+    ):
         """
         Initialize UDP socket.
 
         Args:
             recv_port: Port to listen on for incoming messages
+            rate_limit: Maximum messages per second per peer
         """
         logger.info("Initializing UDPSocketClass on port %d", recv_port)
 
         # Port configuration
         self.recv_port = self._validate_port(recv_port)
 
-        # Network configuration
-        self.mtu = vault_ip.get_min_mtu() - MTU_OVERHEAD
-        logger.info("Using MTU: %d bytes", self.mtu)
+        # Network configuration with proper MTU calculation
+        base_mtu = vault_ip.get_min_mtu()
+        total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + NACL_BOX_OVERHEAD +
+                         MSGPACK_OVERHEAD + REPLAY_PROTECTION_OVERHEAD)
+        self.mtu = base_mtu - total_overhead
+        logger.info("Base MTU: %d, Effective MTU: %d bytes", base_mtu, self.mtu)
 
         # Thread synchronization
         self._lock = threading.RLock()
         self._stop_flag = False
 
-        # Peer management - now supports multiple peers per IP
+        # Peer management
         self._peer_addresses: List[Tuple[str, int]] = []
+
+        # Rate limiting
+        self._rate_limiter = RateLimiter(rate_limit)
 
         # Sockets
         self._read_socket: Optional[socket.socket] = None
@@ -130,9 +219,6 @@ class UDPSocketClass:
 
         Args:
             addr: Tuple of (ip_address, port)
-
-        Note:
-            Multiple peers with the same IP but different ports are now supported.
         """
         if not addr or len(addr) != 2:
             logger.warning("Invalid address format: %s", addr)
@@ -151,7 +237,7 @@ class UDPSocketClass:
             logger.info("Added peer: %s", validated_addr)
 
         # Initiate key exchange
-        self._send_public_key(validated_addr)
+        self._send_public_keys(validated_addr)
 
     def remove_peer(self, addr: Tuple[str, int]) -> None:
         """
@@ -163,7 +249,7 @@ class UDPSocketClass:
         with self._lock:
             if addr in self._peer_addresses:
                 self._peer_addresses.remove(addr)
-                self._encryption.remove_peer_key(addr)
+                self._encryption.remove_peer_keys(addr)
                 logger.info("Removed peer: %s", addr)
             else:
                 logger.warning("Peer %s not found", addr)
@@ -206,7 +292,7 @@ class UDPSocketClass:
 
     def update_recv_port(self, recv_port: int) -> None:
         """
-        Update the listening port (restarts read thread).
+        Update the listening port atomically.
 
         Args:
             recv_port: New port to listen on
@@ -219,24 +305,29 @@ class UDPSocketClass:
 
         logger.info("Changing receive port: %d -> %d", self.recv_port, validated_port)
 
-        # Stop read thread
-        self._stop_flag = True
-        if self._read_socket:
+        with self._lock:
+            # Create new socket
+            new_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            new_socket.settimeout(1.0)
+
             try:
-                self._read_socket.close()
-            except Exception as e:
-                logger.debug("Error closing socket: %s", e)
+                new_socket.bind(('', validated_port))
+            except OSError as e:
+                logger.error("Failed to bind to new port %d: %s", validated_port, e)
+                new_socket.close()
+                raise
 
-        # Wait for thread to finish
-        if self._read_thread and self._read_thread.is_alive():
-            self._read_thread.join(timeout=2.0)
-            if self._read_thread.is_alive():
-                logger.warning("Read thread did not terminate within timeout")
+            # Atomic swap
+            old_socket = self._read_socket
+            self._read_socket = new_socket
+            self.recv_port = validated_port
 
-        # Update port and restart
-        self.recv_port = validated_port
-        self._stop_flag = False
-        self._start_read_thread()
+            # Close old socket
+            if old_socket:
+                try:
+                    old_socket.close()
+                except Exception as e:
+                    logger.debug("Error closing old socket: %s", e)
 
         logger.info("Receive port updated to %d", validated_port)
 
@@ -263,8 +354,9 @@ class UDPSocketClass:
         # Compress
         try:
             compressed_data = pyzstd.compress(data_bytes, 16)
-            logger.debug("Compressed %d bytes to %d bytes",
-                        len(data_bytes), len(compressed_data))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Compressed %d bytes to %d bytes",
+                            len(data_bytes), len(compressed_data))
         except Exception as e:
             logger.error("Compression failed: %s", e)
             raise UDPSocketError(f"Compression failed: {e}") from e
@@ -322,7 +414,6 @@ class UDPSocketClass:
             Dictionary with socket statistics
         """
         with self._lock:
-            # Group peers by IP for stats
             peers_by_ip = {}
             for ip, port in self._peer_addresses:
                 if ip not in peers_by_ip:
@@ -337,8 +428,10 @@ class UDPSocketClass:
                 'peers': self._peer_addresses.copy(),
                 'peers_by_ip': peers_by_ip,
                 'encryption_stats': self._encryption.get_stats(),
-                'public_key': self._encryption.public_key[:32] + "..."
-                             if self._encryption.public_key else None
+                'enc_public_key': self._encryption.enc_public_key[:32] + "..."
+                                 if self._encryption.enc_public_key else None,
+                'sign_public_key': self._encryption.sign_public_key[:32] + "..."
+                                  if self._encryption.sign_public_key else None
             }
 
     # Private methods
@@ -372,7 +465,7 @@ class UDPSocketClass:
         """Main loop for reading from socket."""
         try:
             self._read_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._read_socket.settimeout(1.0)  # 1 second timeout
+            self._read_socket.settimeout(1.0)
             self._read_socket.bind(('', self.recv_port))
             logger.info("Socket bound to port %d", self.recv_port)
         except Exception as e:
@@ -399,17 +492,22 @@ class UDPSocketClass:
 
     def _read_and_process_packet(self) -> None:
         """Read one packet and process it."""
-        # Receive packet
         packet, addr = self._read_socket.recvfrom(48000)
 
-        # Try to decrypt
+        # Rate limiting
+        if not self._rate_limiter.allow_request(addr):
+            logger.warning("Rate limit exceeded for %s, dropping packet", addr)
+            return
+
+        # Try to decrypt (with replay protection)
         try:
             decrypted_data = self._encryption.decrypt_if_possible(packet, addr)
         except Exception as e:
             logger.warning("Decryption error from %s: %s", addr, e)
             return
 
-        logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
 
         # Unpack msgpack
         try:
@@ -430,21 +528,23 @@ class UDPSocketClass:
             logger.debug("Failed to decompress data from %s: %s", addr, e)
             return
 
-        logger.debug("Decompressed to %d bytes", len(payload_bytes))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Decompressed to %d bytes", len(payload_bytes))
 
         # Try to parse as JSON for key exchange
         try:
             msg_dict = json.loads(payload_bytes.decode("utf-8"))
 
             # Handle key exchange
-            if "akey" in msg_dict:
+            if "enc_key" in msg_dict and "sign_key" in msg_dict:
                 self._handle_key_exchange(msg_dict, addr)
                 return
 
             # Handle user data in JSON format
             if "data" in msg_dict:
                 user_data = msg_dict["data"]
-                logger.debug("Emitting user data from %s: %s", addr, user_data)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Emitting user data from %s", addr)
                 self.udp_recv_data.emit(user_data, addr)
                 return
 
@@ -452,22 +552,25 @@ class UDPSocketClass:
             # Not JSON, treat as plain string
             try:
                 data_str = payload_bytes.decode('utf-8')
-                logger.debug("Emitting plain string from %s", addr)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Emitting plain string from %s", addr)
                 self.udp_recv_data.emit(data_str, addr)
             except UnicodeDecodeError:
                 logger.warning("Received non-UTF-8 data from %s", addr)
 
     def _handle_key_exchange(self, msg_dict: dict, addr: Tuple[str, int]) -> None:
         """
-        Handle incoming public key exchange.
+        Handle incoming public key exchange with signature verification.
 
         Args:
-            msg_dict: Message dictionary containing 'akey'
+            msg_dict: Message dictionary containing 'enc_key' and 'sign_key'
             addr: Sender address
         """
-        public_key = msg_dict.get("akey")
-        if not public_key:
-            logger.warning("Key exchange message without key from %s", addr)
+        enc_key = msg_dict.get("enc_key")
+        sign_key = msg_dict.get("sign_key")
+
+        if not enc_key or not sign_key:
+            logger.warning("Key exchange message without keys from %s", addr)
             return
 
         # Update address if port is specified
@@ -476,21 +579,37 @@ class UDPSocketClass:
             if isinstance(port, int):
                 addr = (addr[0], port)
 
+        # Verify signature if present
+        signature = msg_dict.get("signature")
+        if signature:
+            try:
+                # The signature should be over enc_key + sign_key
+                signed_data = (enc_key + sign_key).encode('utf-8')
+                sig_bytes = vault_udp_socket_helper.b64_str_to_bytes(signature)
+
+                # Verify using the sign_key from the message
+                vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
+                logger.debug("Signature verified for %s", addr)
+            except vault_udp_socket_helper.SignatureError:
+                logger.warning("Invalid signature from %s, rejecting keys", addr)
+                return
+
         # Check if this is a new key
-        key_exists = self._encryption.peer_key_exists(addr)
+        key_exists = self._encryption.peer_keys_exist(addr)
 
         if not key_exists:
-            logger.info("Received new public key from %s", addr)
-            self._encryption.update_peer_key(addr, public_key)
-            # Send our key in response
-            self._send_public_key(addr)
+            logger.info("Received new public keys from %s", addr)
+            self._encryption.update_peer_keys(addr, enc_key, sign_key)
+            # Send our keys in response
+            self._send_public_keys(addr)
         else:
-            # Update existing key (refresh timestamp)
-            self._encryption.update_peer_key(addr, public_key)
-            logger.debug("Updated public key for %s", addr)
+            # Update existing keys (refresh timestamp)
+            self._encryption.update_peer_keys(addr, enc_key, sign_key)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Updated public keys for %s", addr)
 
     def _key_management_loop(self) -> None:
-        """Background loop for periodic key exchange."""
+        """Background loop for periodic key exchange and cleanup."""
         logger.debug("Key management thread started")
 
         while not self._stop_flag:
@@ -501,8 +620,12 @@ class UDPSocketClass:
                 for addr in peers:
                     if self._stop_flag:
                         break
-                    self._send_public_key(addr)
-                    logger.debug("Sent periodic key update to %s", addr)
+                    self._send_public_keys(addr)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Sent periodic key update to %s", addr)
+
+                # Cleanup old rate limiter entries
+                self._rate_limiter.cleanup_old_entries()
 
             except Exception as e:
                 logger.error("Error in key management loop: %s", e, exc_info=True)
@@ -516,25 +639,42 @@ class UDPSocketClass:
 
         logger.debug("Key management thread stopped")
 
-    def _send_public_key(self, addr: Tuple[str, int]) -> None:
+    def _send_public_keys(self, addr: Tuple[str, int]) -> None:
         """
-        Send our public key to a peer.
+        Send our public keys to a peer with signature.
 
         Args:
             addr: Target address
         """
+        # Create signature over our keys
+        keys_data = (self._encryption.enc_public_key +
+                    self._encryption.sign_public_key).encode('utf-8')
+
+        try:
+            signed_data = vault_udp_socket_helper.sign_message(
+                self._encryption._sign_private_key,
+                keys_data
+            )
+            signature = vault_udp_socket_helper.bytes_to_b64_str(signed_data)
+        except Exception as e:
+            logger.error("Failed to sign keys: %s", e)
+            signature = None
+
         key_data = {
-            "akey": self._encryption.public_key,
+            "enc_key": self._encryption.enc_public_key,
+            "sign_key": self._encryption.sign_public_key,
+            "signature": signature,
             "port": self.recv_port,
-            "ign": ""  # Ignored field for compatibility
+            "ign": ""
         }
 
         try:
             json_data = json.dumps(key_data)
             self.send_data(json_data, addr)
-            logger.debug("Sent public key to %s", addr)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Sent public keys to %s", addr)
         except Exception as e:
-            logger.error("Failed to send public key to %s: %s", addr, e)
+            logger.error("Failed to send public keys to %s: %s", addr, e)
 
     def _send_internal(
         self,
@@ -578,7 +718,7 @@ class UDPSocketClass:
         # Send to each peer
         for target_addr in target_addrs:
             try:
-                # Try to encrypt
+                # Try to encrypt (with authentication and replay protection)
                 encrypted = self._encryption.encrypt_if_possible(
                     packed_data,
                     target_addr
@@ -586,7 +726,8 @@ class UDPSocketClass:
 
                 # Send
                 self._write_socket.sendto(encrypted, target_addr)
-                logger.debug("Sent %d bytes to %s", len(encrypted), target_addr)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Sent %d bytes to %s", len(encrypted), target_addr)
 
             except Exception as e:
                 logger.error("Failed to send to %s: %s", target_addr, e)
@@ -648,13 +789,13 @@ def main():
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    print("Creating UDP sockets with multiple peers per IP...")
+    print("Creating UDP sockets with authenticated encryption...")
 
     # Create first socket with multiple peers on same IP
     with UDPSocketClass(11000) as socket1:
         socket1.add_peer(("127.0.0.1", 8000))
-        socket1.add_peer(("127.0.0.1", 8001))  # Second peer on same IP
-        socket1.add_peer(("127.0.0.1", 8002))  # Third peer on same IP
+        socket1.add_peer(("127.0.0.1", 8001))
+        socket1.add_peer(("127.0.0.1", 8002))
         socket1.udp_recv_data.connect(print_received_data)
         print(f"Socket 1 stats: {socket1.get_stats()}")
 
@@ -665,7 +806,6 @@ def main():
              UDPSocketClass(8001) as socket3, \
              UDPSocketClass(8002) as socket4:
 
-            # Each connects back to socket1
             socket2.add_peer(("127.0.0.1", 11000))
             socket3.add_peer(("127.0.0.1", 11000))
             socket4.add_peer(("127.0.0.1", 11000))
@@ -675,15 +815,13 @@ def main():
             socket4.udp_recv_data.connect(print_received_data)
 
             print(f"Socket 2 stats: {socket2.get_stats()}")
-            print(f"Socket 3 stats: {socket3.get_stats()}")
-            print(f"Socket 4 stats: {socket4.get_stats()}")
 
             # Wait for key exchange
-            time.sleep(2)
+            time.sleep(3)
 
             # Send test messages
             print("\n--- Broadcasting from socket1 to all peers ---")
-            socket1.send_data("Broadcast to all!")  # Goes to all 3 peers
+            socket1.send_data("Broadcast to all!")
             time.sleep(1)
 
             print("\n--- Individual responses ---")
@@ -691,10 +829,6 @@ def main():
             socket3.send_data("Response from port 8001")
             socket4.send_data("Response from port 8002")
             time.sleep(1)
-
-            # Test get_peers_by_ip
-            peers_on_localhost = socket1.get_peers_by_ip("127.0.0.1")
-            print(f"\nPeers on 127.0.0.1: {peers_on_localhost}")
 
             print("\nTest complete!")
 
