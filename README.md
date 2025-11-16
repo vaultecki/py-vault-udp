@@ -33,7 +33,6 @@ Version 2 introduces a structured protocol with clear separation of concerns:
   - **Payload Channel (`p`)**: User data transmission
   - **Control Channel (`c`)**: Key exchange and protocol management
 - **Structured Format**: msgpack dict `{'v': version, 'p': payload, 'c': control, 'g': padding}`
-- **Legacy Support**: Automatically detects and handles v1 packets
 
 ## Installation
 
@@ -340,12 +339,6 @@ NONCE_CACHE_SIZE = 10000      # Max nonces tracked per peer
 - Structured msgpack format with version field
 - Separate payload and control channels
 - Improved extensibility for future features
-- Backward compatible with v1 (auto-detection)
-
-**v1 (Legacy)**:
-- List-based msgpack format: `[data, padding]`
-- Mixed payload and control in decompressed data
-- Still supported for receiving
 
 ### Future Compatibility
 
@@ -486,14 +479,13 @@ with UDPSocketClass(11000) as socket:
 
 ## Changelog
 
-### Version 2.1.0 (2025) - Protocol v2
+### Version 0.2.0 (2025) - Protocol v2
 - ✨ Introduced protocol v2 with version field
 - ✨ Separated control and payload channels
 - ✨ Structured msgpack format for extensibility
-- ✨ Backward compatibility with v1 (auto-detection)
 - 📝 Updated documentation for protocol v2
 
-### Version 2.0.0 (2024)
+### Version 0.1.0 (2024)
 - ✨ Added authenticated encryption with NaCl Box
 - ✨ Added replay attack prevention
 - ✨ Added signature verification for key exchange
@@ -504,7 +496,7 @@ with UDPSocketClass(11000) as socket:
 - 🔥 Removed password hashing (unused feature)
 - 📝 Completely rewrote documentation
 
-### Version 1.0.0 (2023)
+### Version 0.0.1 (2023)
 - Initial release with basic UDP + encryption
 
 ## Support
