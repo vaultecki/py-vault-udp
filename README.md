@@ -375,13 +375,6 @@ The protocol is designed for evolution:
 
 ## Performance
 
-### Benchmarks (localhost)
-
-- **Throughput**: ~500 MB/s (1500 byte messages)
-- **Latency**: <1ms (encrypted, compressed)
-- **CPU**: ~5% per 100 messages/sec (compression dominant)
-- **Overhead**: v2 adds ~5 bytes vs v1 (negligible)
-
 ### Optimization Tips
 
 1. **Adjust compression level**: `pyzstd.compress(data, level=1)` for speed
@@ -503,7 +496,6 @@ with UDPSocketClass(11000) as socket:
 ## Support
 
 For issues and questions:
-- GitHub Issues: [Your Repo]
 - Documentation: This README
 
 ## Acknowledgments
