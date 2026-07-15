@@ -19,8 +19,6 @@ import threading
 import time
 from typing import Any, Tuple, Optional, Dict
 
-import nacl.exceptions
-
 import vault_udp_socket_helper
 
 logger = logging.getLogger(__name__)
@@ -220,9 +218,8 @@ class VaultAsymmetricEncryption:
             logger.debug("Successfully decrypted data")
             return decrypted_bytes
 
-        except nacl.exceptions.CryptoError as e:
-            logger.warning("Crypto error during decryption: %s", type(e).__name__)
-            raise DecryptionError(f"Decryption failed: {type(e).__name__}") from e
+        # decrypt_sealed() already wraps NaCl/encoding errors into its own
+        # CryptoError hierarchy before they get here.
         except vault_udp_socket_helper.CryptoError as e:
             raise DecryptionError(f"Decryption failed: {e}") from e
         except Exception as e:

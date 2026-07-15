@@ -72,16 +72,6 @@ class InvalidPortError(UDPSocketError):
     pass
 
 
-class RateLimitExceededError(UDPSocketError):
-    """Raised when rate limit is exceeded."""
-    pass
-
-
-class ProtocolVersionError(UDPSocketError):
-    """Raised when unsupported protocol version is encountered."""
-    pass
-
-
 class RateLimiter:
     """Simple token bucket rate limiter."""
 
@@ -140,7 +130,7 @@ class RateLimiter:
 
 class UDPSocketClass:
     """
-    Bidirectional UDP socket with authenticated encryption and rate limiting.
+    Bidirectional UDP socket with anonymous SealedBox encryption and rate limiting.
 
     Protocol v2 Features:
     - Versioned protocol for future compatibility
@@ -362,7 +352,14 @@ class UDPSocketClass:
                 except Exception as e:
                     logger.debug("Error closing old socket: %s", e)
 
+            peers = self._peer_addresses.copy()
+
         logger.info("Receive port updated to %d", validated_port)
+
+        # Peers store our key under the port we last announced. Without
+        # re-announcing, they'd keep encrypting to the now-dead old port.
+        for addr in peers:
+            self._send_public_keys(addr)
 
     def send_data(self, data: Any, addr: Optional[Tuple[str, int]] = None) -> None:
         """
@@ -498,8 +495,14 @@ class UDPSocketClass:
             except OSError as e:
                 if self._stop_flag:
                     break
-                logger.debug("Socket error (likely during shutdown): %s", e)
-                break
+                # update_recv_port() closes the old socket out from under a
+                # blocked recvfrom() on it, which surfaces here as an
+                # OSError even though nothing is actually wrong -- retry and
+                # pick up the (already-swapped) current socket instead of
+                # treating this as fatal.
+                logger.debug("Socket error (possibly a port change): %s", e)
+                time.sleep(0.05)
+                continue
             except Exception as e:
                 if self._stop_flag:
                     break

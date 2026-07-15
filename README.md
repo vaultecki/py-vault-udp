@@ -72,6 +72,13 @@ successfully again, indistinguishable from a fresh message.
 ⚠️ **No tamper-evidence tied to identity**: `SealedBox` still uses an
 authenticated cipher (XSalsa20-Poly1305), so a *modified* ciphertext
 will fail to decrypt — but a *replayed, unmodified* one won't.
+⚠️ **Message injection, not just eavesdropping**: the first key
+announcement between two peers is always sent in plaintext, and UDP
+source addresses are trivially spoofable (there's no handshake or
+cookie). So this is more than a passive confidentiality gap: anyone who
+observes that one plaintext announcement can subsequently send a peer
+forged data that looks like a legitimate encrypted message from the
+other side, without ever needing to intercept or redirect real traffic.
 ⚠️ **Denial of Service**: UDP is inherently vulnerable to packet floods;
 rate limiting is per-source-address only.
 

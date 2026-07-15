@@ -211,3 +211,35 @@ def test_two_sockets_exchange_keys_and_deliver_message(make_socket):
 
     assert _wait_until(lambda: len(received) > 0), "message was not received in time"
     assert received == ["hello world"]
+
+
+def test_update_recv_port_reannounces_to_known_peers(make_socket):
+    sock_a = make_socket()
+    sock_b = make_socket()
+
+    assert _wait_until(
+        lambda: sock_a._read_socket is not None and sock_b._read_socket is not None
+    ), "read sockets did not finish binding in time"
+
+    received = []
+    sock_a.udp_recv_data.connect(lambda data, addr: received.append(data))
+
+    addr_b = ("127.0.0.1", sock_b.recv_port)
+    sock_a.add_peer(addr_b)
+
+    assert _wait_until(
+        lambda: sock_a._encryption.peer_keys_exist(addr_b)
+        and sock_b._encryption.peer_keys_exist(("127.0.0.1", sock_a.recv_port))
+    ), "initial key exchange did not complete in time"
+
+    new_addr_a = ("127.0.0.1", _free_udp_port())
+    sock_a.update_recv_port(new_addr_a[1])
+
+    assert _wait_until(
+        lambda: sock_b._encryption.peer_keys_exist(new_addr_a)
+    ), "peer was not re-announced to after the port change"
+
+    sock_b.send_data("hello after port change", new_addr_a)
+
+    assert _wait_until(lambda: len(received) > 0), "message was not received on the new port"
+    assert received == ["hello after port change"]

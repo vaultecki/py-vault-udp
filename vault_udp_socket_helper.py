@@ -17,10 +17,8 @@ import base64
 import logging
 from typing import Tuple
 
-import nacl.encoding
 import nacl.exceptions
 import nacl.public
-import nacl.utils
 
 logger = logging.getLogger(__name__)
 
