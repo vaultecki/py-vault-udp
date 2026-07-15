@@ -9,11 +9,6 @@ def keypair():
 
 
 @pytest.fixture
-def sender_keys():
-    return helper.generate_keys_asym()
-
-
-@pytest.fixture
 def recipient_keys():
     return helper.generate_keys_asym()
 
@@ -37,11 +32,10 @@ def test_b64_str_to_bytes_invalid_input_raises_encoding_error():
         helper.b64_str_to_bytes("not valid base64!!!")
 
 
-def test_generate_keys_asym_returns_four_distinct_base64_strings():
-    enc_pub, enc_priv, sign_pub, sign_priv = helper.generate_keys_asym()
-    keys = {enc_pub, enc_priv, sign_pub, sign_priv}
-    assert len(keys) == 4
-    for key in keys:
+def test_generate_keys_asym_returns_two_distinct_base64_strings():
+    public_key, private_key = helper.generate_keys_asym()
+    assert public_key != private_key
+    for key in (public_key, private_key):
         # Should not raise
         helper.b64_str_to_bytes(key)
 
@@ -53,8 +47,8 @@ def test_generate_keys_asym_produces_different_keys_each_call():
 
 
 def test_generate_public_key_matches_generated_pair(keypair):
-    enc_pub, enc_priv, _, _ = keypair
-    assert helper.generate_public_key(enc_priv) == enc_pub
+    public_key, private_key = keypair
+    assert helper.generate_public_key(private_key) == public_key
 
 
 def test_generate_public_key_invalid_key_raises_key_generation_error():
@@ -62,119 +56,81 @@ def test_generate_public_key_invalid_key_raises_key_generation_error():
         helper.generate_public_key(helper.bytes_to_b64_str(b"too short"))
 
 
-def test_sign_and_verify_signature_roundtrip(keypair):
-    _, _, sign_pub, sign_priv = keypair
-    message = b"authenticate this message"
-
-    signed = helper.sign_message(sign_priv, message)
-    verified = helper.verify_signature(sign_pub, signed)
-
-    assert verified == message
-
-
-def test_verify_signature_with_wrong_key_raises_signature_error(keypair):
-    _, _, _, sign_priv = keypair
-    _, _, other_sign_pub, _ = helper.generate_keys_asym()
-    message = b"authenticate this message"
-
-    signed = helper.sign_message(sign_priv, message)
-
-    with pytest.raises(helper.SignatureError):
-        helper.verify_signature(other_sign_pub, signed)
-
-
-def test_verify_signature_tampered_data_raises_signature_error(keypair):
-    _, _, sign_pub, sign_priv = keypair
-    signed = bytearray(helper.sign_message(sign_priv, b"original message"))
-    signed[-1] ^= 0xFF  # flip a bit in the message portion
-
-    with pytest.raises(helper.SignatureError):
-        helper.verify_signature(sign_pub, bytes(signed))
-
-
-def test_encrypt_decrypt_roundtrip(sender_keys, recipient_keys):
-    sender_enc_pub, sender_enc_priv, _, _ = sender_keys
-    recipient_enc_pub, recipient_enc_priv, _, _ = recipient_keys
+def test_encrypt_decrypt_roundtrip(recipient_keys):
+    recipient_public, recipient_private = recipient_keys
     message = b"top secret payload"
 
-    encrypted = helper.encrypt_asym(sender_enc_priv, recipient_enc_pub, message)
-    decrypted = helper.decrypt_asym(recipient_enc_priv, sender_enc_pub, encrypted)
+    encrypted = helper.encrypt_sealed(recipient_public, message)
+    decrypted = helper.decrypt_sealed(recipient_private, encrypted)
 
     assert decrypted == message
     assert encrypted != message
 
 
-def test_encrypt_asym_rejects_non_bytes_message(sender_keys, recipient_keys):
-    _, sender_enc_priv, _, _ = sender_keys
-    recipient_enc_pub, _, _, _ = recipient_keys
+def test_encrypt_sealed_needs_no_sender_key_material(recipient_keys):
+    """SealedBox encryption only needs the recipient's public key."""
+    recipient_public, _ = recipient_keys
+    encrypted_once = helper.encrypt_sealed(recipient_public, b"same message")
+    encrypted_twice = helper.encrypt_sealed(recipient_public, b"same message")
+    # Each call uses a fresh ephemeral key internally, so ciphertexts differ
+    # even for identical plaintext -- but both must still decrypt correctly.
+    assert encrypted_once != encrypted_twice
 
+
+def test_encrypt_sealed_rejects_non_bytes_message(recipient_keys):
+    recipient_public, _ = recipient_keys
     with pytest.raises(TypeError):
-        helper.encrypt_asym(sender_enc_priv, recipient_enc_pub, "not bytes")
+        helper.encrypt_sealed(recipient_public, "not bytes")
 
 
-def test_decrypt_asym_rejects_non_bytes_message(sender_keys, recipient_keys):
-    sender_enc_pub, _, _, _ = sender_keys
-    _, recipient_enc_priv, _, _ = recipient_keys
-
+def test_decrypt_sealed_rejects_non_bytes_message(recipient_keys):
+    _, recipient_private = recipient_keys
     with pytest.raises(TypeError):
-        helper.decrypt_asym(recipient_enc_priv, sender_enc_pub, "not bytes")
+        helper.decrypt_sealed(recipient_private, "not bytes")
 
 
-def test_decrypt_asym_with_wrong_sender_key_raises_decryption_error(sender_keys, recipient_keys):
-    sender_enc_pub, sender_enc_priv, _, _ = sender_keys
-    recipient_enc_pub, recipient_enc_priv, _, _ = recipient_keys
-    attacker_enc_pub, _, _, _ = helper.generate_keys_asym()
+def test_decrypt_sealed_with_wrong_recipient_key_raises_decryption_error(recipient_keys):
+    recipient_public, _ = recipient_keys
+    _, other_private = helper.generate_keys_asym()
 
-    encrypted = helper.encrypt_asym(sender_enc_priv, recipient_enc_pub, b"secret")
+    encrypted = helper.encrypt_sealed(recipient_public, b"secret")
 
     with pytest.raises(helper.DecryptionError):
-        helper.decrypt_asym(recipient_enc_priv, attacker_enc_pub, encrypted)
+        helper.decrypt_sealed(other_private, encrypted)
 
 
-def test_decrypt_asym_with_tampered_ciphertext_raises_decryption_error(sender_keys, recipient_keys):
-    sender_enc_pub, sender_enc_priv, _, _ = sender_keys
-    recipient_enc_pub, recipient_enc_priv, _, _ = recipient_keys
+def test_decrypt_sealed_with_tampered_ciphertext_raises_decryption_error(recipient_keys):
+    recipient_public, recipient_private = recipient_keys
 
-    encrypted = bytearray(helper.encrypt_asym(sender_enc_priv, recipient_enc_pub, b"secret"))
+    encrypted = bytearray(helper.encrypt_sealed(recipient_public, b"secret"))
     encrypted[-1] ^= 0xFF
 
     with pytest.raises(helper.DecryptionError):
-        helper.decrypt_asym(recipient_enc_priv, sender_enc_pub, bytes(encrypted))
+        helper.decrypt_sealed(recipient_private, bytes(encrypted))
 
 
 def test_verify_key_pair_valid(keypair):
-    enc_pub, enc_priv, _, _ = keypair
-    assert helper.verify_key_pair(enc_pub, enc_priv) is True
+    public_key, private_key = keypair
+    assert helper.verify_key_pair(public_key, private_key) is True
 
 
 def test_verify_key_pair_mismatched_returns_false(keypair):
-    _, enc_priv, _, _ = keypair
-    other_enc_pub, _, _, _ = helper.generate_keys_asym()
-    assert helper.verify_key_pair(other_enc_pub, enc_priv) is False
+    _, private_key = keypair
+    other_public, _ = helper.generate_keys_asym()
+    assert helper.verify_key_pair(other_public, private_key) is False
 
 
 def test_verify_key_pair_invalid_key_returns_false():
     assert helper.verify_key_pair("bad", "bad") is False
 
 
-def test_encryption_roundtrip_helper_success(sender_keys, recipient_keys):
-    sender_enc_pub, sender_enc_priv, _, _ = sender_keys
-    recipient_enc_pub, recipient_enc_priv, _, _ = recipient_keys
-
-    assert helper.test_encryption_roundtrip(
-        sender_enc_priv, sender_enc_pub,
-        recipient_enc_priv, recipient_enc_pub,
-        b"message"
-    ) is True
+def test_encryption_roundtrip_helper_success(recipient_keys):
+    recipient_public, recipient_private = recipient_keys
+    assert helper.test_encryption_roundtrip(recipient_private, recipient_public, b"message") is True
 
 
-def test_encryption_roundtrip_helper_failure_with_mismatched_keys(sender_keys, recipient_keys):
-    sender_enc_pub, sender_enc_priv, _, _ = sender_keys
-    _, recipient_enc_priv, _, _ = recipient_keys
-    attacker_enc_pub, _, _, _ = helper.generate_keys_asym()
+def test_encryption_roundtrip_helper_failure_with_mismatched_keys(recipient_keys):
+    recipient_public, _ = recipient_keys
+    _, other_private = helper.generate_keys_asym()
 
-    assert helper.test_encryption_roundtrip(
-        sender_enc_priv, sender_enc_pub,
-        recipient_enc_priv, attacker_enc_pub,
-        b"message"
-    ) is False
+    assert helper.test_encryption_roundtrip(other_private, recipient_public, b"message") is False

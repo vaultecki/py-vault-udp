@@ -4,8 +4,12 @@
 """
 Vault UDP Socket Module
 
-Provides bidirectional UDP communication with authenticated encryption,
-automatic key exchange, message compression, and rate limiting.
+Provides bidirectional UDP communication with anonymous SealedBox
+encryption, automatic key exchange, message compression, and rate limiting.
+
+Note: SealedBox encryption does not authenticate the sender, and this
+module does not track message nonces, so there is no replay protection.
+See vault_udp_encryption.py and vault_udp_socket_helper.py for details.
 
 Protocol Version 2:
 - Stricter separation of control and payload data
@@ -29,7 +33,6 @@ import pyzstd
 
 import vault_ip
 import vault_udp_encryption
-import vault_udp_socket_helper
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +47,8 @@ MAX_PORT = 65000
 # MTU calculation with proper overhead
 IP_HEADER_SIZE = 20  # IPv4 (IPv6 would be 40)
 UDP_HEADER_SIZE = 8
-NACL_BOX_OVERHEAD = 40  # Box overhead (24 nonce + 16 authenticator)
+SEALED_BOX_OVERHEAD = 48  # 32-byte ephemeral public key + 16-byte authenticator
 MSGPACK_OVERHEAD = 15  # Increased for structured format
-REPLAY_PROTECTION_OVERHEAD = 24  # 16 bytes nonce + 8 bytes timestamp
 
 DEFAULT_KEY_LIFETIME = 60
 KEY_MGMT_MIN_INTERVAL = 5
@@ -146,8 +148,9 @@ class UDPSocketClass:
     - Structured msgpack format with dedicated fields
 
     Security Features:
-    - Authenticated asymmetric encryption with replay protection
-    - Automatic key exchange with signature verification
+    - Anonymous asymmetric encryption (NaCl SealedBox) -- no sender
+      authentication and no replay protection, see module docstring
+    - Automatic key exchange
     - Message compression (zstd)
     - Rate limiting per peer
     - Thread-safe operations
@@ -182,8 +185,8 @@ class UDPSocketClass:
 
         # Network configuration with proper MTU calculation
         base_mtu = vault_ip.get_min_mtu()
-        total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + NACL_BOX_OVERHEAD +
-                          MSGPACK_OVERHEAD + REPLAY_PROTECTION_OVERHEAD)
+        total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + SEALED_BOX_OVERHEAD +
+                          MSGPACK_OVERHEAD)
         self.mtu = base_mtu - total_overhead
         logger.info("Base MTU: %d, Effective MTU: %d bytes", base_mtu, self.mtu)
 
@@ -455,9 +458,7 @@ class UDPSocketClass:
                 'peers_by_ip': peers_by_ip,
                 'encryption_stats': self._encryption.get_stats(),
                 'enc_public_key': self._encryption.enc_public_key[:32] + "..."
-                if self._encryption.enc_public_key else None,
-                'sign_public_key': self._encryption.sign_public_key[:32] + "..."
-                if self._encryption.sign_public_key else None
+                if self._encryption.enc_public_key else None
             }
 
     # Private methods
@@ -517,9 +518,10 @@ class UDPSocketClass:
             logger.warning("Rate limit exceeded for %s, dropping packet", addr)
             return
 
-        # Try to decrypt (with replay protection)
+        # Try to decrypt (falls back to the raw packet if it isn't ours to
+        # decrypt, e.g. an unencrypted key-exchange message)
         try:
-            decrypted_data = self._encryption.decrypt_if_possible(packet, addr)
+            decrypted_data = self._encryption.decrypt_if_possible(packet)
         except Exception as e:
             logger.warning("Decryption error from %s: %s", addr, e)
             return
@@ -527,7 +529,7 @@ class UDPSocketClass:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
 
-        # Unpack msgpack - handle both v1 (list) and v2 (dict) formats
+        # Unpack msgpack (protocol v2 dict format)
         try:
             unpacked_data = msgpack.unpackb(decrypted_data)
 
@@ -581,7 +583,7 @@ class UDPSocketClass:
             # Control data is JSON
             msg_dict = json.loads(control_data.decode("utf-8"))
 
-            if "enc_key" in msg_dict and "sign_key" in msg_dict:
+            if "enc_key" in msg_dict:
                 self._handle_key_exchange(msg_dict, addr)
             else:
                 logger.warning("Unknown control message from %s", addr)
@@ -618,17 +620,20 @@ class UDPSocketClass:
 
     def _handle_key_exchange(self, msg_dict: dict, addr: Tuple[str, int]) -> None:
         """
-        Handle incoming public key exchange with signature verification.
+        Handle an incoming public key announcement.
+
+        Note: this is not authenticated -- anyone can claim any address and
+        announce a key for it. There is no verification of who actually
+        sent this message, only that it is well-formed.
 
         Args:
-            msg_dict: Message dictionary containing 'enc_key' and 'sign_key'
+            msg_dict: Message dictionary containing 'enc_key'
             addr: Sender address
         """
         enc_key = msg_dict.get("enc_key")
-        sign_key = msg_dict.get("sign_key")
 
-        if not enc_key or not sign_key:
-            logger.warning("Key exchange message without keys from %s", addr)
+        if not enc_key:
+            logger.warning("Key exchange message without a key from %s", addr)
             return
 
         # Update address if port is specified
@@ -637,38 +642,19 @@ class UDPSocketClass:
             if isinstance(port, int):
                 addr = (addr[0], port)
 
-        # Verify signature if present
-        signature = msg_dict.get("signature")
-        if signature:
-            try:
-                # The signature should be over enc_key + sign_key
-                signed_data = (enc_key + sign_key).encode('utf-8')
-                sig_bytes = vault_udp_socket_helper.b64_str_to_bytes(signature)
-
-                # Verify using the sign_key from the message
-                verified_data = vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
-                if verified_data != signed_data:
-                    logger.warning("Signature content mismatch from %s, rejecting keys", addr)
-                    return
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Signature verified for %s", addr)
-            except vault_udp_socket_helper.SignatureError:
-                logger.warning("Invalid signature from %s, rejecting keys", addr)
-                return
-
         # Check if this is a new key
         key_exists = self._encryption.peer_keys_exist(addr)
 
         if not key_exists:
-            logger.info("Received new public keys from %s", addr)
-            self._encryption.update_peer_keys(addr, enc_key, sign_key)
-            # Send our keys in response
+            logger.info("Received new public key from %s", addr)
+            self._encryption.update_peer_keys(addr, enc_key)
+            # Send our key in response
             self._send_public_keys(addr)
         else:
-            # Update existing keys (refresh timestamp)
-            self._encryption.update_peer_keys(addr, enc_key, sign_key)
+            # Update existing key (refresh timestamp)
+            self._encryption.update_peer_keys(addr, enc_key)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Updated public keys for %s", addr)
+                logger.debug("Updated public key for %s", addr)
 
     def _key_management_loop(self) -> None:
         """Background loop for periodic key exchange and cleanup."""
@@ -703,53 +689,37 @@ class UDPSocketClass:
 
     def _send_public_keys(self, addr: Tuple[str, int]) -> None:
         """
-        Send our public keys to a peer with signature via control channel.
+        Send our public key to a peer via the control channel.
 
         Args:
             addr: Target address
         """
-        # Create signature over our keys
-        keys_data = (self._encryption.enc_public_key +
-                     self._encryption.sign_public_key).encode('utf-8')
-
-        try:
-            if self._encryption._sign_private_key is None:
-                raise ValueError("Signing private key not initialized")
-            signed_data = vault_udp_socket_helper.sign_message(
-                self._encryption._sign_private_key,
-                keys_data
-            )
-            signature = vault_udp_socket_helper.bytes_to_b64_str(signed_data)
-        except Exception as e:
-            logger.error("Failed to sign keys: %s", e)
-            signature = None
-
         key_data = {
             "enc_key": self._encryption.enc_public_key,
-            "sign_key": self._encryption.sign_public_key,
-            "signature": signature,
             "port": self.recv_port
         }
 
         try:
-            # Send via control channel (payload is empty). Key exchange
-            # messages are always sent in plaintext: their authenticity comes
-            # from the Ed25519 signature above, not from Box encryption. They
-            # can't be encrypted anyway -- the recipient doesn't have our
-            # public key to decrypt with until this very message delivers it.
+            # Sent via the control channel like any other message: opportunistically
+            # encrypted if we already have the peer's key, plaintext otherwise. Unlike
+            # with Box, there's no reason to force plaintext here -- SealedBox
+            # decryption only needs the recipient's own private key, so encrypting a
+            # key announcement is safe the moment we know the peer's key. The very
+            # first announcement to a never-before-seen peer still goes out in the
+            # clear, simply because encrypt_if_possible() has no key to encrypt with
+            # yet. The key itself needs no confidentiality either way.
             json_data = json.dumps(key_data).encode("utf-8")
-            self._send_internal(b'', json_data, addr, force_plaintext=True)
+            self._send_internal(b'', json_data, addr)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Sent public keys to %s", addr)
+                logger.debug("Sent public key to %s", addr)
         except Exception as e:
-            logger.error("Failed to send public keys to %s: %s", addr, e)
+            logger.error("Failed to send public key to %s: %s", addr, e)
 
     def _send_internal(
             self,
             payload: bytes,
             control: bytes,
-            addr: Optional[Tuple[str, int]] = None,
-            force_plaintext: bool = False
+            addr: Optional[Tuple[str, int]] = None
     ) -> None:
         """
         Internal send method with encryption and padding (protocol v2).
@@ -758,7 +728,6 @@ class UDPSocketClass:
             payload: Compressed user data (or empty for control-only)
             control: Control data like key exchange (or empty for payload-only)
             addr: Target address, or None for all peers
-            force_plaintext: If True, never encrypt (used for key exchange)
 
         Raises:
             MessageTooLargeError: If message exceeds MTU
@@ -800,11 +769,8 @@ class UDPSocketClass:
         # Send to each peer
         for target_addr in target_addrs:
             try:
-                # Try to encrypt (with authentication and replay protection)
-                encrypted = (
-                    packed_data if force_plaintext
-                    else self._encryption.encrypt_if_possible(packed_data, target_addr)
-                )
+                # Try to encrypt (SealedBox, if we have the peer's key)
+                encrypted = self._encryption.encrypt_if_possible(packed_data, target_addr)
 
                 # Send
                 self._write_socket.sendto(encrypted, target_addr)
