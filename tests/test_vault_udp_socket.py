@@ -153,7 +153,7 @@ def test_add_peer_with_preseeded_key_stores_it_immediately(make_socket):
     sock.add_peer((peer_addr[0], peer_addr[1], fake_key))
 
     assert sock.has_peer(peer_addr) is True
-    assert sock._encryption.get_peer_key(peer_addr) == fake_key
+    assert sock.get_peer_key(peer_addr) == fake_key
 
 
 def test_add_peer_with_preseeded_key_sends_first_announcement_encrypted(make_socket, caplog):
@@ -164,11 +164,40 @@ def test_add_peer_with_preseeded_key_sends_first_announcement_encrypted(make_soc
     addr_b = ("127.0.0.1", sock_b.recv_port)
 
     with caplog.at_level("DEBUG", logger="vault_udp_encryption"):
-        sock_a.add_peer((addr_b[0], addr_b[1], sock_b._encryption.enc_public_key))
+        sock_a.add_peer((addr_b[0], addr_b[1], sock_b.own_public_key))
 
     assert not any(
         "sending unencrypted" in record.message for record in caplog.records
     ), "first announcement should have been encrypted since the peer's key was pre-seeded"
+
+
+def test_own_public_key_matches_full_key(make_socket):
+    sock = make_socket()
+    assert sock.own_public_key == sock._encryption.enc_public_key
+    assert sock.own_public_key  # non-empty
+    # get_stats() only exposes a truncated version for display purposes.
+    assert len(sock.own_public_key) > len(sock.get_stats()["enc_public_key"])
+
+
+def test_get_peer_key_returns_none_when_unknown(make_socket):
+    sock = make_socket()
+    assert sock.get_peer_key(("127.0.0.1", _free_udp_port())) is None
+
+
+def test_get_all_peer_keys_reflects_known_peers(make_socket):
+    sock = make_socket()
+    addr_1 = ("127.0.0.1", _free_udp_port())
+    addr_2 = ("127.0.0.1", _free_udp_port())
+
+    sock.add_peer((addr_1[0], addr_1[1], "key-one"))
+    sock.add_peer((addr_2[0], addr_2[1], "key-two"))
+
+    all_keys = sock.get_all_peer_keys()
+
+    assert all_keys == {addr_1: "key-one", addr_2: "key-two"}
+    # Must be a snapshot, not a live view.
+    all_keys[addr_1] = "tampered"
+    assert sock.get_peer_key(addr_1) == "key-one"
 
 
 def test_get_peers_by_ip_filters_correctly(make_socket):
@@ -292,7 +321,7 @@ def test_key_change_for_known_peer_logs_warning(make_socket, caplog):
     with caplog.at_level("WARNING", logger="vault_udp_socket"):
         sock._handle_key_exchange({"enc_key": "new-key"}, addr)
 
-    assert sock._encryption.get_peer_key(addr) == "new-key"
+    assert sock.get_peer_key(addr) == "new-key"
     assert any("changed since last seen" in record.message for record in caplog.records)
 
 

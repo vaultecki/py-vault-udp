@@ -205,6 +205,17 @@ class VaultAsymmetricEncryption:
             addr_tuple: Tuple[str, int] = (addr[0], addr[1])
             return self._peer_enc_keys.get(addr_tuple)
 
+    def get_all_peer_keys(self) -> Dict[Tuple[str, int], str]:
+        """
+        Get a snapshot of all currently stored peer public keys.
+
+        Returns:
+            A copy of the address-to-key mapping (safe to mutate, and
+            won't reflect later changes)
+        """
+        with self._lock:
+            return dict(self._peer_enc_keys)
+
     def set_key_lifetime(self, lifetime: int) -> None:
         """
         Change how long peer keys are kept before they're treated as expired.

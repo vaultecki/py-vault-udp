@@ -74,6 +74,25 @@ def test_get_peer_key_returns_stored_key(encryption):
     assert encryption.get_peer_key(addr) == "enc-key"
 
 
+def test_get_all_peer_keys_returns_snapshot(encryption):
+    addr_1 = ("192.168.1.1", 6000)
+    addr_2 = ("192.168.1.2", 6001)
+    encryption.update_peer_keys(addr_1, "key-one")
+    encryption.update_peer_keys(addr_2, "key-two")
+
+    all_keys = encryption.get_all_peer_keys()
+
+    assert all_keys == {addr_1: "key-one", addr_2: "key-two"}
+
+    # Must be a snapshot, not a live view into internal state.
+    all_keys[addr_1] = "tampered"
+    assert encryption.get_peer_key(addr_1) == "key-one"
+
+
+def test_get_all_peer_keys_empty_when_no_peers(encryption):
+    assert encryption.get_all_peer_keys() == {}
+
+
 def test_set_key_lifetime_affects_expiry(encryption):
     addr = ("192.168.1.1", 6000)
     encryption.update_peer_keys(addr, "enc-key")

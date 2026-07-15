@@ -244,6 +244,42 @@ class UDPSocketClass:
         self.stop()
         return False
 
+    @property
+    def own_public_key(self) -> str:
+        """
+        Our full public encryption key.
+
+        Share this with a peer through some trusted out-of-band channel
+        so they can pass it as the third element to their add_peer() call
+        (see Pre-Sharing a Peer's Key in the README).
+        """
+        return self._encryption.enc_public_key
+
+    def get_peer_key(self, addr: Tuple[str, int]) -> Optional[str]:
+        """
+        Get the currently stored public key for a peer, if any.
+
+        Args:
+            addr: Tuple of (ip_address, port)
+
+        Returns:
+            The stored public key, or None if we don't have one yet
+        """
+        return self._encryption.get_peer_key(addr)
+
+    def get_all_peer_keys(self) -> Dict[Tuple[str, int], str]:
+        """
+        Get a snapshot of all currently known peer public keys.
+
+        Useful for persisting keys you've learned (e.g. to pre-seed
+        add_peer() on a future run) or comparing them against an
+        expected/pinned set.
+
+        Returns:
+            A copy of the address-to-key mapping
+        """
+        return self._encryption.get_all_peer_keys()
+
     def add_peer(self, addr: Union[Tuple[str, int], Tuple[str, int, str]]) -> None:
         """
         Add a peer address to send messages to.

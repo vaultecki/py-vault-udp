@@ -190,6 +190,20 @@ This only pre-loads what *we* know about *them*. If they don't already
 know our key too (e.g. through the same out-of-band exchange), their
 own first announcement to us will still be sent in plaintext.
 
+Use `socket.own_public_key` to get the full key to share with a peer
+this way, and `get_peer_key()` / `get_all_peer_keys()` to read back what
+keys are currently known -- e.g. to persist them for reuse on a future
+run, or to compare against an expected/pinned set:
+
+```python
+# Share this with a peer out-of-band:
+print(socket.own_public_key)
+
+# Later, check or export what we know:
+socket.get_peer_key(("192.168.1.100", 8000))  # -> str | None
+socket.get_all_peer_keys()  # -> {(ip, port): key, ...}
+```
+
 ### Rate Limiting
 
 ```python
@@ -278,6 +292,9 @@ Key](#pre-sharing-a-peers-key))
 **`get_peers() -> List[Tuple[str, int]]`**
 **`has_peer(addr: Tuple[str, int]) -> bool`**
 **`get_peers_by_ip(ip: str) -> List[Tuple[str, int]]`**
+**`own_public_key -> str`** (property) — our full public key, to share out-of-band
+**`get_peer_key(addr: Tuple[str, int]) -> Optional[str]`** — a peer's currently known key, if any
+**`get_all_peer_keys() -> Dict[Tuple[str, int], str]`** — snapshot of all known peer keys
 **`update_recv_port(recv_port: int)`** — atomically rebind to a new port and
 re-announce our key to all known peers under it
 **`update_lifetime(lifetime: int)`** — change how long peer keys are kept
@@ -300,6 +317,7 @@ Lower-level key/encryption manager (usually not used directly).
 **`generate_keys() -> str`** / **`set_private_keys(enc_private_key: str) -> str`**
 **`update_peer_keys(addr, enc_key: str)`** / **`remove_peer_keys(addr)`** / **`peer_keys_exist(addr) -> bool`**
 **`get_peer_key(addr) -> Optional[str]`** — the currently stored key for a peer, or `None`
+**`get_all_peer_keys() -> Dict[Tuple[str, int], str]`** — snapshot of all known peer keys
 **`set_key_lifetime(lifetime: int)`** — change the expiry threshold; wakes the
 background cleanup pass immediately instead of waiting out the old interval
 **`encrypt(data: bytes, addr: Tuple[str, int]) -> bytes`** — raises `KeyNotFoundError` if we don't have that peer's key
