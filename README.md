@@ -175,6 +175,21 @@ print(f"Peers on localhost: {peers}")
 socket.send_data("Broadcast message")
 ```
 
+### Pre-Sharing a Peer's Key
+
+If you already know a peer's public key through some other (trusted)
+channel, pass it as a third element to skip the unauthenticated
+plaintext bootstrap message for that peer -- our very first
+announcement to them goes out encrypted right away instead:
+
+```python
+socket.add_peer(("192.168.1.100", 8000, "base64-encoded-public-key"))
+```
+
+This only pre-loads what *we* know about *them*. If they don't already
+know our key too (e.g. through the same out-of-band exchange), their
+own first announcement to us will still be sent in plaintext.
+
 ### Rate Limiting
 
 ```python
@@ -255,7 +270,10 @@ public key by address, since that's what `SealedBox` encryption requires.
 Bind a single socket (used for both send and receive) and start the
 read and key-management background threads.
 
-**`add_peer(addr: Tuple[str, int])`** — add a peer and send it our key
+**`add_peer(addr: Tuple[str, int] | Tuple[str, int, str])`** — add a peer
+and send it our key; pass a third `key` element to pre-seed the peer's
+key from an out-of-band source (see [Pre-Sharing a Peer's
+Key](#pre-sharing-a-peers-key))
 **`remove_peer(addr: Tuple[str, int])`** — remove peer and its stored key
 **`get_peers() -> List[Tuple[str, int]]`**
 **`has_peer(addr: Tuple[str, int]) -> bool`**

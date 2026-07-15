@@ -25,7 +25,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
-from typing import Optional, Tuple, List, Any, Dict
+from typing import Optional, Tuple, List, Any, Dict, Union
 
 import msgpack
 import psygnal
@@ -244,20 +244,34 @@ class UDPSocketClass:
         self.stop()
         return False
 
-    def add_peer(self, addr: Tuple[str, int]) -> None:
+    def add_peer(self, addr: Union[Tuple[str, int], Tuple[str, int, str]]) -> None:
         """
         Add a peer address to send messages to.
 
         Args:
-            addr: Tuple of (ip_address, port)
+            addr: Either (ip_address, port), or (ip_address, port, key) if
+                you already know the peer's public key through some other
+                (trusted) channel. Pre-seeding the key this way skips the
+                unauthenticated plaintext bootstrap message for this peer
+                entirely -- our very first announcement to them can be
+                encrypted right away instead.
         """
-        if not addr or len(addr) != 2:
+        if not addr or len(addr) not in (2, 3):
             logger.warning("Invalid address format: %s", addr)
             return
 
-        ip, port = addr
+        if len(addr) == 3:
+            ip, port, key = addr
+        else:
+            ip, port = addr
+            key = None
+
         validated_port = self._validate_port(port)
         validated_addr = (ip, validated_port)
+
+        if key:
+            self._encryption.update_peer_keys(validated_addr, key)
+            logger.info("Pre-seeded public key for %s from an out-of-band source", validated_addr)
 
         with self._lock:
             if validated_addr in self._peer_addresses:

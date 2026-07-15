@@ -145,6 +145,32 @@ def test_add_peer_ignores_malformed_address(make_socket):
     assert sock.get_peers() == []
 
 
+def test_add_peer_with_preseeded_key_stores_it_immediately(make_socket):
+    sock = make_socket()
+    peer_addr = ("127.0.0.1", _free_udp_port())
+    fake_key = "some-base64-key"
+
+    sock.add_peer((peer_addr[0], peer_addr[1], fake_key))
+
+    assert sock.has_peer(peer_addr) is True
+    assert sock._encryption.get_peer_key(peer_addr) == fake_key
+
+
+def test_add_peer_with_preseeded_key_sends_first_announcement_encrypted(make_socket, caplog):
+    """A key learned out-of-band should let even the very first
+    announcement go out encrypted, skipping the plaintext bootstrap."""
+    sock_a = make_socket()
+    sock_b = make_socket()
+    addr_b = ("127.0.0.1", sock_b.recv_port)
+
+    with caplog.at_level("DEBUG", logger="vault_udp_encryption"):
+        sock_a.add_peer((addr_b[0], addr_b[1], sock_b._encryption.enc_public_key))
+
+    assert not any(
+        "sending unencrypted" in record.message for record in caplog.records
+    ), "first announcement should have been encrypted since the peer's key was pre-seeded"
+
+
 def test_get_peers_by_ip_filters_correctly(make_socket):
     sock = make_socket()
     sock.add_peer(("127.0.0.1", _free_udp_port()))
