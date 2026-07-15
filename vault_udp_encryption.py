@@ -89,8 +89,11 @@ class VaultAsymmetricEncryption:
         else:
             self.generate_keys()
 
-        # Cleanup thread
+        # Cleanup thread. A threading.Event (rather than a plain sleep) lets
+        # stop() and set_key_lifetime() wake the thread immediately instead
+        # of waiting out a stale interval computed under the old lifetime.
         self._run_cleanup = True
+        self._cleanup_wake_event = threading.Event()
         self._cleanup_thread = threading.Thread(
             target=self._cleanup_loop,
             daemon=True,
@@ -212,6 +215,10 @@ class VaultAsymmetricEncryption:
         with self._lock:
             self._key_max_lifetime = lifetime
             logger.info("Key lifetime updated to %d seconds", lifetime)
+        # Wake the cleanup thread so the new lifetime is applied to the next
+        # cleanup pass right away, instead of after the old (possibly much
+        # longer) sleep interval runs out.
+        self._cleanup_wake_event.set()
 
     def decrypt(self, data: bytes) -> bytes:
         """
@@ -356,6 +363,7 @@ class VaultAsymmetricEncryption:
         """
         logger.info("Stopping VaultAsymmetricEncryption")
         self._run_cleanup = False
+        self._cleanup_wake_event.set()
 
         if self._cleanup_thread.is_alive():
             self._cleanup_thread.join(timeout=timeout)
@@ -388,10 +396,11 @@ class VaultAsymmetricEncryption:
             except Exception as e:
                 logger.error("Error during cleanup: %s", e, exc_info=True)
 
-            # Fixed sleep between cleanup passes, bounded below regardless of
-            # a very short key lifetime.
+            # Wait rather than sleep so stop() / set_key_lifetime() can wake
+            # us immediately instead of waiting out a stale interval.
             sleep_duration = max(MIN_CLEANUP_INTERVAL_SECONDS, self._key_max_lifetime // 2)
-            time.sleep(sleep_duration)
+            self._cleanup_wake_event.wait(timeout=sleep_duration)
+            self._cleanup_wake_event.clear()
 
         logger.debug("Cleanup thread stopped")
 

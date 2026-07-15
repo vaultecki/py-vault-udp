@@ -220,9 +220,12 @@ class UDPSocketClass:
             lifetime=self.lifetime
         )
 
-        # Threads
+        # Threads. A threading.Event (rather than a plain sleep) lets
+        # stop() and update_lifetime() wake the key management thread
+        # immediately instead of waiting out a stale interval.
         self._read_thread: Optional[threading.Thread] = None
         self._key_mgmt_thread: Optional[threading.Thread] = None
+        self._key_mgmt_wake_event = threading.Event()
 
         # Connect send signal
         self.udp_send_data.connect(self.send_data)
@@ -327,11 +330,13 @@ class UDPSocketClass:
 
         Note:
             This also changes how often we re-announce our key to peers
-            (roughly lifetime // 3), but takes effect for that only on the
-            next scheduled announcement, not immediately.
+            (roughly lifetime // 3). Both the encryption manager's expiry
+            check and the announcement cadence pick up the new value
+            immediately rather than waiting out their current interval.
         """
         self.lifetime = lifetime
         self._encryption.set_key_lifetime(lifetime)
+        self._key_mgmt_wake_event.set()
         logger.info("Key lifetime updated to %d seconds", lifetime)
 
     def update_recv_port(self, recv_port: int) -> None:
@@ -426,6 +431,7 @@ class UDPSocketClass:
         logger.info("Stopping UDPSocketClass")
 
         self._stop_flag = True
+        self._key_mgmt_wake_event.set()
 
         # Stop encryption manager
         self._encryption.stop(timeout=timeout)
@@ -711,12 +717,15 @@ class UDPSocketClass:
             except Exception as e:
                 logger.error("Error in key management loop: %s", e, exc_info=True)
 
-            # Random sleep to avoid synchronization
+            # Randomized wait to avoid synchronization; interruptible so
+            # stop() / update_lifetime() can wake us immediately instead of
+            # waiting out a stale interval.
             sleep_duration = random.randint(
                 KEY_MGMT_MIN_INTERVAL,
                 max(KEY_MGMT_MIN_INTERVAL, self.lifetime // 3)
             )
-            time.sleep(sleep_duration)
+            self._key_mgmt_wake_event.wait(timeout=sleep_duration)
+            self._key_mgmt_wake_event.clear()
 
         logger.debug("Key management thread stopped")
 

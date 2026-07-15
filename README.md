@@ -281,6 +281,9 @@ Lower-level key/encryption manager (usually not used directly).
 
 **`generate_keys() -> str`** / **`set_private_keys(enc_private_key: str) -> str`**
 **`update_peer_keys(addr, enc_key: str)`** / **`remove_peer_keys(addr)`** / **`peer_keys_exist(addr) -> bool`**
+**`get_peer_key(addr) -> Optional[str]`** — the currently stored key for a peer, or `None`
+**`set_key_lifetime(lifetime: int)`** — change the expiry threshold; wakes the
+background cleanup pass immediately instead of waiting out the old interval
 **`encrypt(data: bytes, addr: Tuple[str, int]) -> bytes`** — raises `KeyNotFoundError` if we don't have that peer's key
 **`decrypt(data: bytes) -> bytes`** — no `addr` needed; raises `DecryptionError` on failure
 **`encrypt_if_possible` / `decrypt_if_possible`** — same, falling back to the original data on failure instead of raising
@@ -312,9 +315,10 @@ socket = UDPSocketClass(recv_port=11000, lifetime=120)
 socket.update_lifetime(300)
 ```
 
-`update_lifetime()` takes effect immediately for key expiry. The
-periodic re-announcement cadence (roughly `lifetime // 3`) picks up the
-new value starting with its next scheduled run.
+`update_lifetime()` takes effect immediately: both the background key
+expiry check and the periodic re-announcement cadence (roughly
+`lifetime // 3`) are woken up and re-evaluated right away, rather than
+waiting out whatever interval was computed under the old lifetime.
 
 ### MTU Overhead Calculation
 

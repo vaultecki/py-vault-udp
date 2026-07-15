@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 import vault_udp_encryption as ve
@@ -83,6 +85,36 @@ def test_set_key_lifetime_affects_expiry(encryption):
 
     assert removed == 1
     assert encryption.get_stats()["key_lifetime_seconds"] == 0
+
+
+def test_set_key_lifetime_wakes_cleanup_thread_immediately(encryption):
+    """The background cleanup thread starts with a long (lifetime=60) sleep
+    interval. set_key_lifetime() must wake it right away instead of leaving
+    an already-expired key in place until that old interval runs out."""
+    addr = ("192.168.1.1", 6000)
+    encryption.update_peer_keys(addr, "enc-key")
+    encryption._peer_keys_timestamp[addr] = encryption._current_timestamp() - 5
+
+    encryption.set_key_lifetime(1)  # the 5s-old key is now expired
+
+    deadline = time.time() + 1.0
+    while time.time() < deadline and encryption.peer_keys_exist(addr):
+        time.sleep(0.01)
+
+    assert encryption.peer_keys_exist(addr) is False
+
+
+def test_stop_returns_promptly_even_with_a_long_lifetime():
+    """stop() must not have to wait out the cleanup thread's sleep
+    interval, which can be tens of seconds for a long key lifetime."""
+    enc = ve.VaultAsymmetricEncryption(lifetime=600)
+
+    start = time.time()
+    enc.stop(timeout=5.0)
+    elapsed = time.time() - start
+
+    assert elapsed < 1.0
+    assert enc._cleanup_thread.is_alive() is False
 
 
 def test_encrypt_decrypt_roundtrip_between_peers(peer_pair):

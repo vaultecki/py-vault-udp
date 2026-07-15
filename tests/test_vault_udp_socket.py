@@ -279,3 +279,16 @@ def test_same_key_reannounced_does_not_log_warning(make_socket, caplog):
         sock._handle_key_exchange({"enc_key": "same-key"}, addr)
 
     assert not any("changed since last seen" in record.message for record in caplog.records)
+
+
+def test_stop_returns_promptly_even_with_a_long_lifetime(make_socket):
+    """stop() must not have to wait out the key management thread's sleep
+    interval, which can be tens of seconds for a long key lifetime."""
+    sock = make_socket(lifetime=600)
+
+    start = time.time()
+    sock.stop(timeout=5.0)
+    elapsed = time.time() - start
+
+    assert elapsed < 2.0
+    assert sock._key_mgmt_thread.is_alive() is False
