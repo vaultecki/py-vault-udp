@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "py-vault-udp"
 version = "0.2.0"
-description = "Python UDP communication library with opportunistic encryption, authenticated encryption, automatic key exchange, and replay attack prevention."
+description = "Python UDP communication library with opportunistic, anonymous encryption, automatic key exchange, message compression, and rate limiting."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
