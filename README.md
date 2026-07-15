@@ -190,9 +190,15 @@ Encrypted Packet (after encryption):
 #### Key Exchange Protocol
 1. Generate encryption keypair (X25519) and signing keypair (Ed25519)
 2. Sign public keys with signing private key
-3. Exchange signed public keys with peers via control channel
+3. Exchange signed public keys with peers via control channel, **always in
+   plaintext** — a peer's Box public key can't be used to encrypt the very
+   message that first announces it, so authenticity here comes from the
+   Ed25519 signature alone, not from confidentiality
 4. Verify signatures before accepting keys
 5. Periodic key refresh with configurable lifetime
+
+Once both sides know each other's keys, all further payload traffic is
+encrypted with NaCl Box as described above.
 
 ### Message Format Examples
 
@@ -306,10 +312,13 @@ Lower-level encryption manager (usually not used directly).
 
 ### Key Lifetime
 
-```python
-socket = UDPSocketClass(recv_port=11000)
-socket.lifetime = 120  # seconds
-```
+Peer keys currently expire after a fixed 60 seconds
+(`DEFAULT_KEY_LIFETIME` in `vault_udp_socket.py`). There is no constructor
+argument or public setter to change this yet — setting `socket.lifetime`
+after construction only changes the periodic key-resend cadence, it does
+*not* reach the encryption manager's actual expiry check, so it won't
+change when keys are dropped. Edit `DEFAULT_KEY_LIFETIME` directly if you
+need a different value for now.
 
 ### MTU Overhead Calculation
 
@@ -360,7 +369,7 @@ The protocol is designed for evolution:
 ✅ **Protocol Downgrade**: Version checking prevents downgrade attacks
 
 ### Threats Not Mitigated
-⚠️ **Initial Key Exchange**: First key exchange is not pre-authenticated (use TLS/certificates for that)  
+⚠️ **Initial Key Exchange (Trust-On-First-Use)**: The signature on a peer's first key-exchange message proves the message wasn't tampered with and that the sender controls the matching private key — it does *not* prove the sender is who you think they are. There's no external identity check, so a first-contact MITM can present its own, self-consistently signed keys (use TLS/certificates or an out-of-band fingerprint check if you need to verify peer identity)  
 ⚠️ **Denial of Service**: UDP is inherently vulnerable to packet floods  
 ⚠️ **Traffic Analysis**: Packet sizes are padded to MTU but timing is visible  
 
@@ -388,7 +397,6 @@ The protocol is designed for evolution:
 - Check your MTU: `socket.get_stats()['mtu']`
 - Reduce message size or split into chunks
 - Data is compressed automatically but some data doesn't compress well
-- v2 uses ~5 more bytes than v1 for structure
 
 ### Keys not exchanging
 - Check network connectivity
@@ -409,14 +417,26 @@ The protocol is designed for evolution:
 
 ### Protocol version mismatch
 - Check logs for version mismatch warnings
-- Older v1 clients can still receive from v2 (backward compatible)
-- Update all peers to v2 for best compatibility
+- Packets with a different version number are dropped, not translated — there
+  is currently no cross-version compatibility, so all peers need to run the
+  same protocol version
 
 ## Testing
 
-```python
-# Run built-in tests
-python vault_udp_socket.py        # Tests protocol v2
+The `tests/` directory has a pytest suite covering the crypto primitives,
+the encryption manager (including replay protection), the network utilities,
+and a real end-to-end encrypted UDP exchange between two sockets:
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+Each module also has a `main()` with a runnable demo (not an automated
+test) that you can use to explore the library interactively:
+
+```bash
+python vault_udp_socket.py        # Protocol v2 demo with multiple peers
 python vault_udp_encryption.py
 python vault_udp_socket_helper.py
 python vault_ip.py
@@ -472,6 +492,25 @@ with UDPSocketClass(11000) as socket:
 5. Submit a pull request
 
 ## Changelog
+
+### Unreleased
+- 🐛 Fixed key-exchange signature verification: the signed payload was
+  never compared against the claimed keys, so any validly-signed message
+  was accepted regardless of its content
+- 🐛 Fixed encrypted traffic being silently dropped: the send socket was
+  unbound, so outgoing packets used a random ephemeral source port instead
+  of `recv_port`, which peers rely on to look up stored keys
+- 🐛 Fixed key-exchange replies being sent encrypted with a key the
+  recipient couldn't have yet (it was inside that very message); key
+  exchange is now always sent in plaintext, authenticated by its Ed25519
+  signature
+- 🔧 Migrated dependencies from `requirements.txt` into `pyproject.toml`
+  (`pip install -e .`)
+- 🔧 Replaced the unmaintained, untyped `PySignal` with `psygnal`
+- 🔥 Removed the dead top-level `__init__.py` (its relative imports could
+  never work in a directory whose name isn't a valid Python identifier)
+- ✅ Added a pytest suite covering crypto primitives, replay protection,
+  network utilities, and end-to-end encrypted UDP exchange
 
 ### Version 0.2.0 (2025) - Protocol v2
 - ✨ Introduced protocol v2 with version field
