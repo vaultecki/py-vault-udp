@@ -145,6 +145,19 @@ def test_add_peer_ignores_malformed_address(make_socket):
     assert sock.get_peers() == []
 
 
+def test_add_peer_with_key_updates_existing_peer_without_duplicating(make_socket):
+    sock = make_socket()
+    peer_addr = ("127.0.0.1", _free_udp_port())
+
+    sock.add_peer(peer_addr)
+    assert sock.get_peer_key(peer_addr) is None
+
+    sock.add_peer((peer_addr[0], peer_addr[1], "out-of-band-key"))
+
+    assert sock.get_peer_key(peer_addr) == "out-of-band-key"
+    assert sock.get_peers().count(peer_addr) == 1
+
+
 def test_add_peer_with_preseeded_key_stores_it_immediately(make_socket):
     sock = make_socket()
     peer_addr = ("127.0.0.1", _free_udp_port())
