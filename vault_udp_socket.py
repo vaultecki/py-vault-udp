@@ -24,7 +24,7 @@ from collections import defaultdict
 from typing import Optional, Tuple, List, Any, Dict
 
 import msgpack
-import PySignal
+import psygnal
 import pyzstd
 
 import vault_ip
@@ -159,9 +159,9 @@ class UDPSocketClass:
     Thread-safe: All operations use internal locking.
     """
 
-    # Class-level signals
-    udp_recv_data = PySignal.ClassSignal()
-    udp_send_data = PySignal.ClassSignal()
+    # Signals
+    udp_recv_data = psygnal.Signal(str, tuple)
+    udp_send_data = psygnal.Signal(object, tuple)
 
     def __init__(
             self,

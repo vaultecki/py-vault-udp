@@ -38,16 +38,16 @@ Version 2 introduces a structured protocol with clear separation of concerns:
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Requirements
-- Python 3.7+
+- Python 3.10+
 - msgpack
 - pyzstd
 - psutil
-- PySignal~=1.1.1
-- PyNaCl~=1.6.0
+- psygnal>=0.10
+- PyNaCl>=1.6.0
 
 ## Quick Start
 

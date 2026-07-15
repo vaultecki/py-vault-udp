@@ -1,20 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py-vault-udp"
+version = "0.2.0"
+description = "Python UDP communication library with opportunistic encryption, authenticated encryption, automatic key exchange, and replay attack prevention."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "msgpack",
+    "pyzstd",
+    "psutil",
+    "psygnal>=0.10",
+    "PyNaCl>=1.6.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy", "pytest", "types-psutil"]
+
+[tool.setuptools]
+py-modules = ["vault_ip", "vault_udp_encryption", "vault_udp_socket_helper", "vault_udp_socket"]
+
 [tool.mypy]
 python_version = "3.10"
 files = ["vault_ip.py", "vault_udp_encryption.py", "vault_udp_socket_helper.py", "vault_udp_socket.py"]
 warn_unused_ignores = true
 warn_redundant_casts = true
-namespace_packages = true
-explicit_package_bases = true
-mypy_path = "."
-
-# __init__.py lives in a directory whose name ("py-vault-udp") is not a valid
-# Python identifier, so mypy cannot resolve its relative imports as a package.
-exclude = ["^__init__\\.py$"]
 
 [[tool.mypy.overrides]]
-module = ["msgpack.*", "PySignal.*", "pyzstd.*"]
+module = ["msgpack.*", "pyzstd.*"]
 ignore_missing_imports = true
 
-# pytest config lives in tests/pytest.ini: pytest must not treat this
-# directory as its rootdir, since collecting it walks through __init__.py
-# (see the comment on tool.mypy.exclude above) and fails to import it.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
