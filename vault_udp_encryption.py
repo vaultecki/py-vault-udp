@@ -15,7 +15,7 @@ import random
 import threading
 import time
 from collections import defaultdict
-from typing import Tuple, Optional, Dict, Set
+from typing import Any, Tuple, Optional, Dict, Set
 
 import nacl.exceptions
 
@@ -195,7 +195,7 @@ class VaultAsymmetricEncryption:
             return
 
         with self._lock:
-            addr_tuple = tuple(addr)
+            addr_tuple: Tuple[str, int] = (addr[0], addr[1])
             self._peer_enc_keys[addr_tuple] = enc_key
             self._peer_sign_keys[addr_tuple] = sign_key
             self._peer_keys_timestamp[addr_tuple] = self._current_timestamp()
@@ -209,7 +209,7 @@ class VaultAsymmetricEncryption:
             addr: Tuple of (ip_address, port)
         """
         with self._lock:
-            addr_tuple = tuple(addr)
+            addr_tuple: Tuple[str, int] = (addr[0], addr[1])
             if addr_tuple in self._peer_enc_keys:
                 self._peer_enc_keys.pop(addr_tuple)
                 self._peer_sign_keys.pop(addr_tuple, None)
@@ -229,7 +229,7 @@ class VaultAsymmetricEncryption:
             True if keys exist, False otherwise
         """
         with self._lock:
-            addr_tuple = tuple(addr)
+            addr_tuple: Tuple[str, int] = (addr[0], addr[1])
             return (addr_tuple in self._peer_enc_keys and
                     addr_tuple in self._peer_sign_keys)
 
@@ -253,7 +253,7 @@ class VaultAsymmetricEncryption:
         if not self._enc_private_key:
             raise DecryptionError("No private encryption key configured")
 
-        addr_tuple = tuple(addr)
+        addr_tuple: Tuple[str, int] = (addr[0], addr[1])
 
         with self._lock:
             peer_enc_key = self._peer_enc_keys.get(addr_tuple)
@@ -337,7 +337,7 @@ class VaultAsymmetricEncryption:
         if not self._enc_private_key:
             raise EncryptionError("No private encryption key configured")
 
-        addr_tuple = tuple(addr)
+        addr_tuple: Tuple[str, int] = (addr[0], addr[1])
 
         with self._lock:
             peer_enc_key = self._peer_enc_keys.get(addr_tuple)
@@ -484,7 +484,7 @@ class VaultAsymmetricEncryption:
             else:
                 logger.info("Cleanup thread terminated successfully")
 
-    def get_stats(self) -> Dict[str, any]:
+    def get_stats(self) -> Dict[str, Any]:
         """
         Get statistics about managed keys and replay protection.
 

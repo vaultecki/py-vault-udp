@@ -9,7 +9,7 @@ Provides network interface utilities for determining MTU and IP addresses.
 
 import logging
 import socket
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import psutil
 
@@ -161,13 +161,13 @@ def get_ipv6_addresses() -> List[str]:
         )
 
         # Extract unique IPv6 addresses
-        ipv6_addresses = []
+        ipv6_addresses: List[str] = []
         seen = set()
 
         for addr_info in addr_info_list:
             # addr_info format: (family, type, proto, canonname, sockaddr)
             # sockaddr for IPv6: (address, port, flow info, scope id)
-            ipv6_addr = addr_info[4][0]
+            ipv6_addr = str(addr_info[4][0])
 
             if ipv6_addr not in seen:
                 ipv6_addresses.append(ipv6_addr)
@@ -205,7 +205,7 @@ def get_ip_addresses() -> Tuple[List[str], List[str]]:
     return (ipv4_list, ipv6_list)
 
 
-def get_all_interface_addresses() -> dict:
+def get_all_interface_addresses() -> Dict[str, Dict[str, List[str]]]:
     """
     Get all IP addresses for all network interfaces.
 
@@ -218,7 +218,7 @@ def get_all_interface_addresses() -> dict:
             }
         }
     """
-    interfaces = {}
+    interfaces: Dict[str, Dict[str, List[str]]] = {}
 
     try:
         if_addrs = psutil.net_if_addrs()

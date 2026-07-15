@@ -198,8 +198,22 @@ class UDPSocketClass:
         self._rate_limiter = RateLimiter(rate_limit)
 
         # Sockets
-        self._read_socket: Optional[socket.socket] = None
-        self._write_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # A single socket is used for both sending and receiving, bound
+        # synchronously here. This guarantees outgoing packets carry
+        # `recv_port` as their source port, which peers rely on to look up
+        # our keys after key exchange (see _handle_key_exchange) -- an
+        # unbound send socket would get a random ephemeral source port that
+        # never matches, silently breaking all encrypted traffic.
+        bound_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        bound_socket.settimeout(1.0)
+        try:
+            bound_socket.bind(('', self.recv_port))
+        except OSError as e:
+            bound_socket.close()
+            logger.error("Failed to bind socket to port %d: %s", self.recv_port, e)
+            raise
+        self._read_socket: Optional[socket.socket] = bound_socket
+        self._write_socket = bound_socket
 
         # Encryption
         self.lifetime = DEFAULT_KEY_LIFETIME
@@ -332,9 +346,10 @@ class UDPSocketClass:
                 new_socket.close()
                 raise
 
-            # Atomic swap
+            # Atomic swap (read and write share the same bound socket)
             old_socket = self._read_socket
             self._read_socket = new_socket
+            self._write_socket = new_socket
             self.recv_port = validated_port
 
             # Close old socket
@@ -393,17 +408,12 @@ class UDPSocketClass:
         # Stop encryption manager
         self._encryption.stop(timeout=timeout)
 
-        # Close sockets
+        # Close the socket (read and write share the same bound socket)
         if self._read_socket:
             try:
                 self._read_socket.close()
             except Exception as e:
-                logger.debug("Error closing read socket: %s", e)
-
-        try:
-            self._write_socket.close()
-        except Exception as e:
-            logger.debug("Error closing write socket: %s", e)
+                logger.debug("Error closing socket: %s", e)
 
         # Wait for threads
         threads = [
@@ -429,7 +439,7 @@ class UDPSocketClass:
             Dictionary with socket statistics
         """
         with self._lock:
-            peers_by_ip = {}
+            peers_by_ip: Dict[str, List[int]] = {}
             for ip, port in self._peer_addresses:
                 if ip not in peers_by_ip:
                     peers_by_ip[ip] = []
@@ -479,15 +489,6 @@ class UDPSocketClass:
 
     def _read_loop(self) -> None:
         """Main loop for reading from socket."""
-        try:
-            self._read_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._read_socket.settimeout(1.0)
-            self._read_socket.bind(('', self.recv_port))
-            logger.info("Socket bound to port %d", self.recv_port)
-        except Exception as e:
-            logger.error("Failed to bind socket to port %d: %s", self.recv_port, e)
-            return
-
         while not self._stop_flag:
             try:
                 self._read_and_process_packet()
@@ -508,6 +509,7 @@ class UDPSocketClass:
 
     def _read_and_process_packet(self) -> None:
         """Read one packet and process it."""
+        assert self._read_socket is not None, "read socket must be bound before reading"
         packet, addr = self._read_socket.recvfrom(48000)
 
         # Rate limiting
@@ -644,7 +646,10 @@ class UDPSocketClass:
                 sig_bytes = vault_udp_socket_helper.b64_str_to_bytes(signature)
 
                 # Verify using the sign_key from the message
-                vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
+                verified_data = vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
+                if verified_data != signed_data:
+                    logger.warning("Signature content mismatch from %s, rejecting keys", addr)
+                    return
                 if logger.isEnabledFor(logging.DEBUG):
                     logger.debug("Signature verified for %s", addr)
             except vault_udp_socket_helper.SignatureError:
@@ -708,6 +713,8 @@ class UDPSocketClass:
                      self._encryption.sign_public_key).encode('utf-8')
 
         try:
+            if self._encryption._sign_private_key is None:
+                raise ValueError("Signing private key not initialized")
             signed_data = vault_udp_socket_helper.sign_message(
                 self._encryption._sign_private_key,
                 keys_data
@@ -725,9 +732,13 @@ class UDPSocketClass:
         }
 
         try:
-            # Send via control channel (payload is empty)
+            # Send via control channel (payload is empty). Key exchange
+            # messages are always sent in plaintext: their authenticity comes
+            # from the Ed25519 signature above, not from Box encryption. They
+            # can't be encrypted anyway -- the recipient doesn't have our
+            # public key to decrypt with until this very message delivers it.
             json_data = json.dumps(key_data).encode("utf-8")
-            self._send_internal(b'', json_data, addr)
+            self._send_internal(b'', json_data, addr, force_plaintext=True)
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("Sent public keys to %s", addr)
         except Exception as e:
@@ -737,7 +748,8 @@ class UDPSocketClass:
             self,
             payload: bytes,
             control: bytes,
-            addr: Optional[Tuple[str, int]] = None
+            addr: Optional[Tuple[str, int]] = None,
+            force_plaintext: bool = False
     ) -> None:
         """
         Internal send method with encryption and padding (protocol v2).
@@ -746,6 +758,7 @@ class UDPSocketClass:
             payload: Compressed user data (or empty for control-only)
             control: Control data like key exchange (or empty for payload-only)
             addr: Target address, or None for all peers
+            force_plaintext: If True, never encrypt (used for key exchange)
 
         Raises:
             MessageTooLargeError: If message exceeds MTU
@@ -788,9 +801,9 @@ class UDPSocketClass:
         for target_addr in target_addrs:
             try:
                 # Try to encrypt (with authentication and replay protection)
-                encrypted = self._encryption.encrypt_if_possible(
-                    packed_data,
-                    target_addr
+                encrypted = (
+                    packed_data if force_plaintext
+                    else self._encryption.encrypt_if_possible(packed_data, target_addr)
                 )
 
                 # Send
@@ -870,7 +883,7 @@ def main():
         socket1.udp_recv_data.connect(print_received_data)
 
         stats = socket1.get_stats()
-        print(f"\nSocket 1 stats:")
+        print("\nSocket 1 stats:")
         print(f"  Protocol version: {stats['protocol_version']}")
         print(f"  Peers: {stats['peer_count']}")
         print(f"  MTU: {stats['mtu']}")
