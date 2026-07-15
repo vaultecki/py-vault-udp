@@ -243,3 +243,39 @@ def test_update_recv_port_reannounces_to_known_peers(make_socket):
 
     assert _wait_until(lambda: len(received) > 0), "message was not received on the new port"
     assert received == ["hello after port change"]
+
+
+def test_lifetime_constructor_param_is_used(make_socket):
+    sock = make_socket(lifetime=15)
+    assert sock.lifetime == 15
+    assert sock.get_stats()["encryption_stats"]["key_lifetime_seconds"] == 15
+
+
+def test_update_lifetime_propagates_to_encryption_manager(make_socket):
+    sock = make_socket(lifetime=60)
+    sock.update_lifetime(15)
+    assert sock.lifetime == 15
+    assert sock.get_stats()["encryption_stats"]["key_lifetime_seconds"] == 15
+
+
+def test_key_change_for_known_peer_logs_warning(make_socket, caplog):
+    sock = make_socket()
+    addr = ("127.0.0.1", _free_udp_port())
+    sock._encryption.update_peer_keys(addr, "old-key")
+
+    with caplog.at_level("WARNING", logger="vault_udp_socket"):
+        sock._handle_key_exchange({"enc_key": "new-key"}, addr)
+
+    assert sock._encryption.get_peer_key(addr) == "new-key"
+    assert any("changed since last seen" in record.message for record in caplog.records)
+
+
+def test_same_key_reannounced_does_not_log_warning(make_socket, caplog):
+    sock = make_socket()
+    addr = ("127.0.0.1", _free_udp_port())
+    sock._encryption.update_peer_keys(addr, "same-key")
+
+    with caplog.at_level("WARNING", logger="vault_udp_socket"):
+        sock._handle_key_exchange({"enc_key": "same-key"}, addr)
+
+    assert not any("changed since last seen" in record.message for record in caplog.records)

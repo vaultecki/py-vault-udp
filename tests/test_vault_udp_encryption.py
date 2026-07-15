@@ -62,6 +62,29 @@ def test_update_peer_keys_ignores_empty_key(encryption):
     assert encryption.peer_keys_exist(addr) is False
 
 
+def test_get_peer_key_returns_none_when_unknown(encryption):
+    assert encryption.get_peer_key(("192.168.1.1", 6000)) is None
+
+
+def test_get_peer_key_returns_stored_key(encryption):
+    addr = ("192.168.1.1", 6000)
+    encryption.update_peer_keys(addr, "enc-key")
+    assert encryption.get_peer_key(addr) == "enc-key"
+
+
+def test_set_key_lifetime_affects_expiry(encryption):
+    addr = ("192.168.1.1", 6000)
+    encryption.update_peer_keys(addr, "enc-key")
+
+    encryption.set_key_lifetime(0)
+    encryption._peer_keys_timestamp[addr] = encryption._current_timestamp() - 1
+
+    removed = encryption.cleanup_expired_keys()
+
+    assert removed == 1
+    assert encryption.get_stats()["key_lifetime_seconds"] == 0
+
+
 def test_encrypt_decrypt_roundtrip_between_peers(peer_pair):
     encryption, peer, addr_a, addr_b = peer_pair
 

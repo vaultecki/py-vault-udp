@@ -188,6 +188,31 @@ class VaultAsymmetricEncryption:
             addr_tuple: Tuple[str, int] = (addr[0], addr[1])
             return addr_tuple in self._peer_enc_keys
 
+    def get_peer_key(self, addr: Tuple[str, int]) -> Optional[str]:
+        """
+        Get the currently stored public key for a peer, if any.
+
+        Args:
+            addr: Tuple of (ip_address, port)
+
+        Returns:
+            The stored public key, or None if we don't have one
+        """
+        with self._lock:
+            addr_tuple: Tuple[str, int] = (addr[0], addr[1])
+            return self._peer_enc_keys.get(addr_tuple)
+
+    def set_key_lifetime(self, lifetime: int) -> None:
+        """
+        Change how long peer keys are kept before they're treated as expired.
+
+        Args:
+            lifetime: New maximum lifetime for peer keys, in seconds
+        """
+        with self._lock:
+            self._key_max_lifetime = lifetime
+            logger.info("Key lifetime updated to %d seconds", lifetime)
+
     def decrypt(self, data: bytes) -> bytes:
         """
         Decrypt data addressed to us.

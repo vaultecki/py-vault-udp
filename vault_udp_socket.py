@@ -159,7 +159,8 @@ class UDPSocketClass:
     def __init__(
             self,
             recv_port: int = DEFAULT_RECV_PORT,
-            rate_limit: int = DEFAULT_RATE_LIMIT
+            rate_limit: int = DEFAULT_RATE_LIMIT,
+            lifetime: int = DEFAULT_KEY_LIFETIME
     ):
         """
         Initialize UDP socket.
@@ -167,6 +168,8 @@ class UDPSocketClass:
         Args:
             recv_port: Port to listen on for incoming messages
             rate_limit: Maximum messages per second per peer
+            lifetime: How long peer keys are kept before they expire, in
+                seconds. Use update_lifetime() to change this later.
         """
         logger.info("Initializing UDPSocketClass v%d on port %d", PROTOCOL_VERSION, recv_port)
 
@@ -193,10 +196,13 @@ class UDPSocketClass:
         # Sockets
         # A single socket is used for both sending and receiving, bound
         # synchronously here. This guarantees outgoing packets carry
-        # `recv_port` as their source port, which peers rely on to look up
-        # our keys after key exchange (see _handle_key_exchange) -- an
-        # unbound send socket would get a random ephemeral source port that
-        # never matches, silently breaking all encrypted traffic.
+        # `recv_port` as their source port, matching the port we announce
+        # in key exchange (see _send_public_keys/_handle_key_exchange) --
+        # an unbound send socket would get a random ephemeral source port
+        # instead, so peers would store our key under one address but our
+        # actual replies would keep arriving from another, and any message
+        # they send back to the address they know us by would go to a port
+        # nothing is listening on.
         bound_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         bound_socket.settimeout(1.0)
         try:
@@ -209,7 +215,7 @@ class UDPSocketClass:
         self._write_socket = bound_socket
 
         # Encryption
-        self.lifetime = DEFAULT_KEY_LIFETIME
+        self.lifetime = lifetime
         self._encryption = vault_udp_encryption.VaultAsymmetricEncryption(
             lifetime=self.lifetime
         )
@@ -311,6 +317,22 @@ class UDPSocketClass:
         """
         with self._lock:
             return [addr for addr in self._peer_addresses if addr[0] == ip]
+
+    def update_lifetime(self, lifetime: int) -> None:
+        """
+        Change how long peer keys are kept before they expire.
+
+        Args:
+            lifetime: New key lifetime in seconds
+
+        Note:
+            This also changes how often we re-announce our key to peers
+            (roughly lifetime // 3), but takes effect for that only on the
+            next scheduled announcement, not immediately.
+        """
+        self.lifetime = lifetime
+        self._encryption.set_key_lifetime(lifetime)
+        logger.info("Key lifetime updated to %d seconds", lifetime)
 
     def update_recv_port(self, recv_port: int) -> None:
         """
@@ -521,13 +543,9 @@ class UDPSocketClass:
             logger.warning("Rate limit exceeded for %s, dropping packet", addr)
             return
 
-        # Try to decrypt (falls back to the raw packet if it isn't ours to
-        # decrypt, e.g. an unencrypted key-exchange message)
-        try:
-            decrypted_data = self._encryption.decrypt_if_possible(packet)
-        except Exception as e:
-            logger.warning("Decryption error from %s: %s", addr, e)
-            return
+        # Try to decrypt; falls back to the raw packet if it isn't ours to
+        # decrypt (e.g. an unencrypted key-exchange message), never raises.
+        decrypted_data = self._encryption.decrypt_if_possible(packet)
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
@@ -646,18 +664,30 @@ class UDPSocketClass:
                 addr = (addr[0], port)
 
         # Check if this is a new key
-        key_exists = self._encryption.peer_keys_exist(addr)
+        previous_key = self._encryption.get_peer_key(addr)
 
-        if not key_exists:
+        if previous_key is None:
             logger.info("Received new public key from %s", addr)
             self._encryption.update_peer_keys(addr, enc_key)
             # Send our key in response
             self._send_public_keys(addr)
+        elif previous_key != enc_key:
+            # Not authenticated (see class docstring), so this could be a
+            # legitimate key rotation just as easily as someone else now
+            # sending from this address with a different key. We can't
+            # tell the difference, but we can at least make it visible
+            # instead of silently overwriting a key we'd already trusted.
+            logger.warning(
+                "Public key for %s changed since last seen -- accepting it "
+                "anyway (no authentication to verify against)", addr
+            )
+            self._encryption.update_peer_keys(addr, enc_key)
         else:
-            # Update existing key (refresh timestamp)
+            # Same key seen again (e.g. a periodic re-announcement) --
+            # refresh its expiry timestamp.
             self._encryption.update_peer_keys(addr, enc_key)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Updated public key for %s", addr)
+                logger.debug("Refreshed public key for %s", addr)
 
     def _key_management_loop(self) -> None:
         """Background loop for periodic key exchange and cleanup."""

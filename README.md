@@ -65,7 +65,11 @@ send you a message that decrypts cleanly and looks legitimate.
 from a given IP:port is accepted at face value. There is no signature,
 certificate, or other proof tying a key to a specific peer. This is
 trust-on-first-use with no verification step at all — weaker than the
-previous signed-but-still-TOFU design.
+previous signed-but-still-TOFU design. As a (non-cryptographic) mitigation,
+a key that changes for an address we'd already seen a key for is logged as
+a `WARNING` instead of silently accepted, so at least there's something to
+notice or alert on — it does not distinguish a legitimate key rotation
+from a hijack attempt.
 ⚠️ **No replay protection**: there is no nonce or timestamp tracking.
 A captured ciphertext can be re-sent verbatim and will decrypt
 successfully again, indistinguishable from a fresh message.
@@ -247,7 +251,7 @@ public key by address, since that's what `SealedBox` encryption requires.
 
 ### UDPSocketClass (`vault_udp_socket.py`)
 
-**`__init__(recv_port: int = 11000, rate_limit: int = 100)`**
+**`__init__(recv_port: int = 11000, rate_limit: int = 100, lifetime: int = 60)`**
 Bind a single socket (used for both send and receive) and start the
 read and key-management background threads.
 
@@ -256,7 +260,10 @@ read and key-management background threads.
 **`get_peers() -> List[Tuple[str, int]]`**
 **`has_peer(addr: Tuple[str, int]) -> bool`**
 **`get_peers_by_ip(ip: str) -> List[Tuple[str, int]]`**
-**`update_recv_port(recv_port: int)`** — atomically rebind to a new port
+**`update_recv_port(recv_port: int)`** — atomically rebind to a new port and
+re-announce our key to all known peers under it
+**`update_lifetime(lifetime: int)`** — change how long peer keys are kept
+before they're treated as expired
 **`send_data(data: Union[str, bytes], addr: Optional[Tuple[str, int]] = None)`**
 Send via the payload channel; `addr=None` broadcasts to all peers.
 Raises `MessageTooLargeError` if the compressed message doesn't fit the
@@ -296,13 +303,18 @@ Lower-level key/encryption manager (usually not used directly).
 
 ### Key Lifetime
 
-Peer keys currently expire after a fixed 60 seconds
-(`DEFAULT_KEY_LIFETIME` in `vault_udp_socket.py`). There is no
-constructor argument or public setter to change this yet — setting
-`socket.lifetime` after construction only changes the periodic
-key-resend cadence, it does *not* reach the encryption manager's actual
-expiry check. Edit `DEFAULT_KEY_LIFETIME` directly if you need a
-different value for now.
+Peer keys default to a 60 second lifetime, configurable at construction
+or afterward:
+
+```python
+socket = UDPSocketClass(recv_port=11000, lifetime=120)
+...
+socket.update_lifetime(300)
+```
+
+`update_lifetime()` takes effect immediately for key expiry. The
+periodic re-announcement cadence (roughly `lifetime // 3`) picks up the
+new value starting with its next scheduled run.
 
 ### MTU Overhead Calculation
 
