@@ -399,7 +399,7 @@ python vault_ip.py
 
 ## License
 
-- Copyright [2025] [ecki]
+- Copyright 2025 ecki
 - SPDX-License-Identifier: Apache-2.0
 
 ## Acknowledgments
