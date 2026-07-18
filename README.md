@@ -1,39 +1,113 @@
-# py-vault-udp
+# py-vault-udp (sealedbox branch)
 
-Python UDP communication library with opportunistic encryption, authenticated encryption, automatic key exchange, and replay attack prevention.
+Python UDP communication library with opportunistic, anonymous encryption,
+automatic key exchange, message compression, and rate limiting.
+
+This branch replaces the previous NaCl `Box`-based (authenticated,
+signed) encryption with NaCl `SealedBox` (anonymous, unauthenticated)
+encryption. **Read the [Security Model](#security-model) section before
+using this** — the trade-offs are different from what "authenticated
+encryption" usually implies.
+
+## Why SealedBox
+
+The `Box`-based design had two structural problems:
+
+1. **Bootstrap chicken-and-egg**: `Box` encryption needs *both* the
+   sender's private key and the recipient's public key (it's
+   Diffie-Hellman based). A peer's first key announcement can't be
+   encrypted with the peer's own key, because the recipient doesn't have
+   that key yet — it's inside the very message announcing it.
+2. **Source-port coupling**: decrypting a `Box` message requires knowing
+   who sent it, which this library resolved by looking up a stored key by
+   the packet's source address. That's fragile against port/address
+   changes.
+
+`SealedBox` sidesteps both: encrypting only needs the *recipient's*
+public key, and decrypting only needs *our own* private key — the
+recipient's identity never has to be known or looked up to open a
+message. The cost is that `SealedBox` provides no sender authentication
+at all (see below).
 
 ## Features
 
-### Security
-- 🔒 **Authenticated Encryption**: Uses NaCl Box (X25519 + XSalsa20-Poly1305) for authenticated encryption
-- ✍️ **Signature Support**: Ed25519 signing for key exchange verification
-- 🛡️ **Replay Attack Prevention**: Automatic nonce tracking and message timestamp verification
-- 🔑 **Automatic Key Exchange**: Seamless public key distribution with signature verification
-- ⏰ **Key Lifecycle Management**: Automatic expiration and cleanup of old keys
-- ⚠️ **Warning**: opportunistic encryption, fallback is unencrypted UDP
-
-### Performance
+- 🔓 **Anonymous Encryption**: NaCl `SealedBox` (X25519 + XSalsa20-Poly1305), opportunistic — falls back to plaintext UDP if no peer key is known yet
+- 🔑 **Automatic Key Exchange**: peers announce their public key on `add_peer()` and periodically afterward; announcements are encrypted once a peer's key is already known, plaintext otherwise
+- ⏰ **Key Lifecycle Management**: automatic expiration and cleanup of stored peer keys
 - 📦 **Message Compression**: Zstd compression for reduced bandwidth
-- 🚀 **Thread-Safe**: RLock-based synchronization for concurrent operations
-- 📊 **Rate Limiting**: Configurable per-peer rate limiting to prevent DoS
-- 🎯 **MTU-Aware**: Automatic MTU calculation with proper overhead accounting
+- 🎯 **MTU-Aware Padding**: packets are padded to a constant size to resist size-based traffic analysis
+- 📊 **Rate Limiting**: configurable per-peer rate limiting
+- 🔄 **Multiple Peers**: supports multiple peers on the same IP address
+- 🌐 **Network Discovery**: automatic interface and MTU detection
+- 📡 **Protocol Versioning**: structured, versioned msgpack format (currently v2)
+- 🚀 **Thread-Safe**: all public operations use internal locking
 
-### Reliability
-- 🔄 **Multiple Peers**: Support for multiple peers on same IP address
-- 🌐 **Network Discovery**: Automatic interface and MTU detection
-- 📝 **Comprehensive Logging**: Detailed logging at all levels
-- 🧹 **Resource Management**: Automatic cleanup of expired keys and nonces
-- 📡 **Protocol Versioning**: Future-proof design with version negotiation (currently v2)
+## Security Model
+
+Read this carefully — it differs meaningfully from a typical "encrypted
+messaging" library.
+
+### What SealedBox gives you
+✅ **Confidentiality against passive eavesdroppers**: anyone without the
+recipient's private key cannot read a message's plaintext.
+✅ **Opportunistic protection**: traffic is encrypted whenever a peer's
+key is known, with a plaintext fallback otherwise (so the library keeps
+working even before/without key exchange).
+✅ **Size-based traffic analysis resistance**: all packets are padded to
+the same MTU-derived size.
+
+### What it does NOT give you
+⚠️ **No sender authentication**: `SealedBox` proves a message was
+encrypted for *your* public key. It proves nothing about who encrypted
+it. Anyone who has your public key (which is, by design, public) can
+send you a message that decrypts cleanly and looks legitimate.
+⚠️ **No peer identity verification**: a key announcement claiming to be
+from a given IP:port is accepted at face value. There is no signature,
+certificate, or other proof tying a key to a specific peer. This is
+trust-on-first-use with no verification step at all — weaker than the
+previous signed-but-still-TOFU design. As a (non-cryptographic) mitigation,
+a key that changes for an address we'd already seen a key for is logged as
+a `WARNING` instead of silently accepted, so at least there's something to
+notice or alert on — it does not distinguish a legitimate key rotation
+from a hijack attempt.
+⚠️ **No replay protection**: there is no nonce or timestamp tracking.
+A captured ciphertext can be re-sent verbatim and will decrypt
+successfully again, indistinguishable from a fresh message.
+⚠️ **No tamper-evidence tied to identity**: `SealedBox` still uses an
+authenticated cipher (XSalsa20-Poly1305), so a *modified* ciphertext
+will fail to decrypt — but a *replayed, unmodified* one won't.
+⚠️ **Message injection, not just eavesdropping**: the first key
+announcement between two peers is always sent in plaintext, and UDP
+source addresses are trivially spoofable (there's no handshake or
+cookie). So this is more than a passive confidentiality gap: anyone who
+observes that one plaintext announcement can subsequently send a peer
+forged data that looks like a legitimate encrypted message from the
+other side, without ever needing to intercept or redirect real traffic.
+⚠️ **Denial of Service**: UDP is inherently vulnerable to packet floods;
+rate limiting is per-source-address only.
+
+### When this is (and isn't) appropriate
+This model fits use cases where confidentiality against passive network
+observers is the goal — e.g. hiding payload content and sizes on a
+network you don't fully trust — and where peers are on a network where
+spoofing/replay isn't a practical threat, or where the application layer
+adds its own authentication and freshness checks on top. It is **not**
+appropriate if you need to know a message genuinely came from a specific
+peer, or need protection against a captured packet being replayed.
+If you need those properties, use TLS/mTLS, or reintroduce
+signing and nonce tracking on top of this (see `main` branch history for
+a signed+replay-protected variant built on `Box`).
 
 ## Protocol Version 2
 
-Version 2 introduces a structured protocol with clear separation of concerns:
-
-- **Version Field**: Enables future protocol evolution and backward compatibility
-- **Separate Channels**: 
-  - **Payload Channel (`p`)**: User data transmission
-  - **Control Channel (`c`)**: Key exchange and protocol management
+- **Version Field**: enables future protocol evolution and compatibility checks
+- **Separate Channels**:
+  - **Payload Channel (`p`)**: user data transmission
+  - **Control Channel (`c`)**: key exchange
 - **Structured Format**: msgpack dict `{'v': version, 'p': payload, 'c': control, 'g': padding}`
+
+Packets with an unexpected version number are dropped, not translated —
+there's no cross-version compatibility.
 
 ## Installation
 
@@ -59,7 +133,7 @@ from vault_udp_socket import UDPSocketClass
 # Create socket
 socket = UDPSocketClass(recv_port=11000)
 
-# Add peer
+# Add peer (triggers an immediate key announcement)
 socket.add_peer(("192.168.1.100", 8000))
 
 # Connect callback for received data
@@ -68,10 +142,10 @@ def on_data(data, addr):
 
 socket.udp_recv_data.connect(on_data)
 
-# Send data
+# Send data (opportunistically encrypted once the peer's key is known)
 socket.send_data("Hello, World!")
 
-# Send to specific peer
+# Send to a specific peer
 socket.send_data("Direct message", ("192.168.1.100", 8000))
 
 # Cleanup
@@ -90,12 +164,10 @@ with UDPSocketClass(recv_port=11000) as socket:
 ### Multiple Peers
 
 ```python
-# Multiple peers on same IP
 socket.add_peer(("127.0.0.1", 8000))
 socket.add_peer(("127.0.0.1", 8001))
 socket.add_peer(("127.0.0.1", 8002))
 
-# Get peers by IP
 peers = socket.get_peers_by_ip("127.0.0.1")
 print(f"Peers on localhost: {peers}")
 
@@ -103,442 +175,240 @@ print(f"Peers on localhost: {peers}")
 socket.send_data("Broadcast message")
 ```
 
+### Pre-Sharing a Peer's Key
+
+If you already know a peer's public key through some other (trusted)
+channel, pass it as a third element to skip the unauthenticated
+plaintext bootstrap message for that peer -- our very first
+announcement to them goes out encrypted right away instead:
+
+```python
+socket.add_peer(("192.168.1.100", 8000, "base64-encoded-public-key"))
+```
+
+This only pre-loads what *we* know about *them*. If they don't already
+know our key too (e.g. through the same out-of-band exchange), their
+own first announcement to us will still be sent in plaintext.
+
+Use `socket.own_public_key` to get the full key to share with a peer
+this way, and `get_peer_key()` / `get_all_peer_keys()` to read back what
+keys are currently known -- e.g. to persist them for reuse on a future
+run, or to compare against an expected/pinned set:
+
+```python
+# Share this with a peer out-of-band:
+print(socket.own_public_key)
+
+# Later, check or export what we know:
+socket.get_peer_key(("192.168.1.100", 8000))  # -> str | None
+socket.get_all_peer_keys()  # -> {(ip, port): key, ...}
+```
+
 ### Rate Limiting
 
 ```python
-# Custom rate limit (messages per second per peer)
-socket = UDPSocketClass(recv_port=11000, rate_limit=50)
+socket = UDPSocketClass(recv_port=11000, rate_limit=50)  # msgs/sec/peer
 ```
 
-### Check Protocol Version
+### Check Protocol Version / Stats
 
 ```python
 stats = socket.get_stats()
 print(f"Protocol version: {stats['protocol_version']}")
-# Output: Protocol version: 2
+print(f"MTU: {stats['mtu']}")
+print(f"Peers: {stats['peer_count']}")
 ```
 
 ## Architecture
 
-### Components
-
 ```
-vault_udp_socket.py          # Main UDP socket with encryption (Protocol v2)
-├── vault_udp_encryption.py  # Encryption manager with replay protection
-│   └── vault_udp_socket_helper.py  # Crypto primitives (NaCl wrapper)
-└── vault_ip.py             # Network utilities (MTU, IP detection)
+vault_udp_socket.py          # UDP socket, protocol v2 framing, key exchange
+├── vault_udp_encryption.py  # Peer key lifecycle + SealedBox encrypt/decrypt
+│   └── vault_udp_socket_helper.py  # SealedBox crypto primitives (NaCl wrapper)
+└── vault_ip.py               # Network utilities (MTU, IP detection)
 ```
 
-### Protocol v2 Design
-
-#### Packet Structure
+### Packet Structure
 
 ```
 Encrypted Packet (after encryption):
-┌─────────────────────────────────────────┐
-│ NaCl Box (authenticated encryption)     │
-│ ┌─────────────────────────────────────┐ │
-│ │ Nonce (16 bytes)                    │ │
-│ │ Timestamp (8 bytes, double)         │ │
-│ │ Msgpack Payload:                    │ │
-│ │ ┌─────────────────────────────────┐ │ │
-│ │ │ {                               │ │ │
-│ │ │   'v': 2,          # version    │ │ │
-│ │ │   'p': bytes,      # payload    │ │ │
-│ │ │   'c': bytes,      # control    │ │ │
-│ │ │   'g': bytes       # padding    │ │ │
-│ │ │ }                               │ │ │
-│ │ └─────────────────────────────────┘ │ │
-│ └─────────────────────────────────────┘ │
-└─────────────────────────────────────────┘
+┌───────────────────────────────────────────┐
+│ NaCl SealedBox                             │
+│ ┌─────────────────────────────────────────┐│
+│ │ Ephemeral public key (32 bytes)          ││
+│ │ Ciphertext + Poly1305 MAC (16 bytes)     ││
+│ │ Msgpack Payload:                         ││
+│ │ ┌───────────────────────────────────────┐││
+│ │ │ {                                     │││
+│ │ │   'v': 2,          # version          │││
+│ │ │   'p': bytes,      # payload          │││
+│ │ │   'c': bytes,      # control          │││
+│ │ │   'g': bytes       # padding          │││
+│ │ │ }                                     │││
+│ │ └───────────────────────────────────────┘││
+│ └─────────────────────────────────────────┘│
+└───────────────────────────────────────────┘
 ```
 
-#### Channel Separation
+If no key is known for the peer yet, the msgpack payload is sent as-is,
+unencrypted.
 
-**Payload Channel (`p`)**:
-- Compressed user data (zstd)
-- Empty for control-only packets
-- Emits `udp_recv_data` signal when received
+### Channel Separation
 
-**Control Channel (`c`)**:
-- Key exchange messages (JSON)
-- Protocol management
-- Processed internally, not exposed to user
+**Payload Channel (`p`)**: compressed user data; empty for control-only
+packets; emits the `udp_recv_data` signal when received.
 
-**Version Field (`v`)**:
-- Current version: 2
-- Future versions can add features
-- Receivers check version compatibility
+**Control Channel (`c`)**: key announcements (`{"enc_key": ..., "port":
+...}` as JSON); processed internally, not exposed to user code.
 
-**Padding Field (`g`)**:
-- Random padding to reach MTU
-- Prevents traffic analysis based on size
+### Key Exchange
 
-### Security Design
+1. Generate an X25519 encryption key pair (no signing key pair anymore)
+2. On `add_peer()`, announce our public key + listening port via the
+   control channel — encrypted if we already have that peer's key,
+   plaintext otherwise (see [Security Model](#security-model))
+3. On receiving an announcement, store the sender's key (address-keyed)
+   and, if this is the first time we've seen that peer, reply with our
+   own announcement
+4. Re-announce periodically to refresh key lifetime on both sides
 
-#### Authenticated Encryption
-- Uses NaCl Box for authenticated encryption between peers
-- Each message includes sender authentication
-- Prevents tampering and impersonation attacks
-
-#### Replay Attack Prevention
-- 16-byte random nonce per message
-- 8-byte timestamp in each message
-- Nonce cache with automatic cleanup
-- Configurable message freshness window (default: 60 seconds)
-
-#### Key Exchange Protocol
-1. Generate encryption keypair (X25519) and signing keypair (Ed25519)
-2. Sign public keys with signing private key
-3. Exchange signed public keys with peers via control channel, **always in
-   plaintext** — a peer's Box public key can't be used to encrypt the very
-   message that first announces it, so authenticity here comes from the
-   Ed25519 signature alone, not from confidentiality
-4. Verify signatures before accepting keys
-5. Periodic key refresh with configurable lifetime
-
-Once both sides know each other's keys, all further payload traffic is
-encrypted with NaCl Box as described above.
-
-### Message Format Examples
-
-#### User Data (Payload Channel)
-```python
-# When you call: socket.send_data("Hello")
-# Sent packet structure (after all processing):
-{
-    'v': 2,                    # Protocol version
-    'p': b'compressed("Hello")', # Compressed payload
-    'c': b'',                  # Empty control
-    'g': b'random...'          # Padding
-}
-```
-
-#### Key Exchange (Control Channel)
-```python
-# Automatically sent during key exchange:
-{
-    'v': 2,
-    'p': b'',                  # Empty payload
-    'c': b'{"enc_key": "...", "sign_key": "...", "signature": "..."}',
-    'g': b'random...'
-}
-```
+Decryption never needs to look up who sent a packet — it only uses our
+own private key. Encryption still needs to look up the target peer's
+public key by address, since that's what `SealedBox` encryption requires.
 
 ## API Reference
 
-### UDPSocketClass
+### UDPSocketClass (`vault_udp_socket.py`)
 
-#### Methods
+**`__init__(recv_port: int = 11000, rate_limit: int = 100, lifetime: int = 60)`**
+Bind a single socket (used for both send and receive) and start the
+read and key-management background threads.
 
-**`__init__(recv_port: int = 11000, rate_limit: int = 100)`**
-- Initialize UDP socket with protocol v2
-- `recv_port`: Port to listen on
-- `rate_limit`: Maximum messages per second per peer
-
-**`add_peer(addr: Tuple[str, int])`**
-- Add peer and initiate key exchange
-- `addr`: Tuple of (ip, port)
-
-**`remove_peer(addr: Tuple[str, int])`**
-- Remove peer and cleanup keys
-
-**`send_data(data: Union[str, bytes], addr: Optional[Tuple[str, int]] = None)`**
-- Send data to peer(s) via payload channel
-- `addr`: Specific peer or None for broadcast
-
+**`add_peer(addr: Tuple[str, int] | Tuple[str, int, str])`** — add a peer
+and send it our key; pass a third `key` element to pre-seed the peer's
+key from an out-of-band source (see [Pre-Sharing a Peer's
+Key](#pre-sharing-a-peers-key))
+**`remove_peer(addr: Tuple[str, int])`** — remove peer and its stored key
 **`get_peers() -> List[Tuple[str, int]]`**
-- Get list of all peers
-
-**`get_peers_by_ip(ip: str) -> List[Tuple[str, int]]`**
-- Get all peers with specific IP
-
 **`has_peer(addr: Tuple[str, int]) -> bool`**
-- Check if peer exists
+**`get_peers_by_ip(ip: str) -> List[Tuple[str, int]]`**
+**`own_public_key -> str`** (property) — our full public key, to share out-of-band
+**`get_peer_key(addr: Tuple[str, int]) -> Optional[str]`** — a peer's currently known key, if any
+**`get_all_peer_keys() -> Dict[Tuple[str, int], str]`** — snapshot of all known peer keys
+**`update_recv_port(recv_port: int)`** — atomically rebind to a new port and
+re-announce our key to all known peers under it
+**`update_lifetime(lifetime: int)`** — change how long peer keys are kept
+before they're treated as expired
+**`send_data(data: Union[str, bytes], addr: Optional[Tuple[str, int]] = None)`**
+Send via the payload channel; `addr=None` broadcasts to all peers.
+Raises `MessageTooLargeError` if the compressed message doesn't fit the
+MTU, `TypeError` if `data` isn't `str`/`bytes`.
+**`get_stats() -> dict`** — protocol version, MTU, peer counts, own public key, encryption stats
+**`stop(timeout: float = 5.0)`** — stop threads and close the socket
 
-**`update_recv_port(recv_port: int)`**
-- Change listening port (atomic)
+**Signals** (via [psygnal](https://github.com/pyapp-kit/psygnal)):
+- `udp_recv_data`: emitted `(data: str, addr: Tuple[str, int])` when payload data is received
+- `udp_send_data`: connected to `send_data` for external/signal-based triggering
 
-**`get_stats() -> dict`**
-- Get socket statistics including protocol version
+### VaultAsymmetricEncryption (`vault_udp_encryption.py`)
 
-**`stop(timeout: float = 5.0)`**
-- Stop all threads and close sockets
+Lower-level key/encryption manager (usually not used directly).
 
-#### Signals
+**`generate_keys() -> str`** / **`set_private_keys(enc_private_key: str) -> str`**
+**`update_peer_keys(addr, enc_key: str)`** / **`remove_peer_keys(addr)`** / **`peer_keys_exist(addr) -> bool`**
+**`get_peer_key(addr) -> Optional[str]`** — the currently stored key for a peer, or `None`
+**`get_all_peer_keys() -> Dict[Tuple[str, int], str]`** — snapshot of all known peer keys
+**`set_key_lifetime(lifetime: int)`** — change the expiry threshold; wakes the
+background cleanup pass immediately instead of waiting out the old interval
+**`encrypt(data: bytes, addr: Tuple[str, int]) -> bytes`** — raises `KeyNotFoundError` if we don't have that peer's key
+**`decrypt(data: bytes) -> bytes`** — no `addr` needed; raises `DecryptionError` on failure
+**`encrypt_if_possible` / `decrypt_if_possible`** — same, falling back to the original data on failure instead of raising
+**`cleanup_expired_keys() -> int`** / **`get_stats() -> dict`**
 
-**`udp_recv_data`**
-- Emitted when user data is received (payload channel)
-- Signature: `(data: str, addr: Tuple[str, int])`
+### Crypto primitives (`vault_udp_socket_helper.py`)
 
-**`udp_send_data`**
-- Connected to `send_data` method
-- For external triggering
+**`generate_keys_asym() -> Tuple[str, str]`** — `(public_key, private_key)`
+**`generate_public_key(private_key: str) -> str`**
+**`encrypt_sealed(recipient_public_key: str, message: bytes) -> bytes`**
+**`decrypt_sealed(recipient_private_key: str, message: bytes) -> bytes`**
+**`verify_key_pair(enc_public_key: str, enc_private_key: str) -> bool`**
+**`bytes_to_b64_str` / `b64_str_to_bytes`**
 
-### VaultAsymmetricEncryption
+### Network Utilities (`vault_ip.py`)
 
-Lower-level encryption manager (usually not used directly).
-
-#### Methods
-
-**`generate_keys() -> Tuple[str, str]`**
-- Generate new key pairs
-- Returns: (enc_public_key, sign_public_key)
-
-**`encrypt(data: bytes, addr: Tuple[str, int]) -> bytes`**
-- Encrypt with authentication and replay protection
-
-**`decrypt(data: bytes, addr: Tuple[str, int]) -> bytes`**
-- Decrypt and verify (with replay detection)
-
-**`update_peer_keys(addr, enc_key: str, sign_key: str)`**
-- Update peer's public keys
-
-### Network Utilities (vault_ip.py)
-
-**`get_min_mtu() -> int`**
-- Get minimum MTU across all interfaces
-
-**`get_ipv4_addresses() -> List[str]`**
-- Get all IPv4 addresses
-
-**`get_ipv6_addresses() -> List[str]`**
-- Get all IPv6 addresses
-
-**`get_network_info() -> dict`**
-- Get comprehensive network information
+**`get_min_mtu() -> int`** / **`get_ipv4_addresses() -> List[str]`** / **`get_ipv6_addresses() -> List[str]`** / **`get_network_info() -> dict`**
 
 ## Configuration
 
 ### Key Lifetime
 
-Peer keys currently expire after a fixed 60 seconds
-(`DEFAULT_KEY_LIFETIME` in `vault_udp_socket.py`). There is no constructor
-argument or public setter to change this yet — setting `socket.lifetime`
-after construction only changes the periodic key-resend cadence, it does
-*not* reach the encryption manager's actual expiry check, so it won't
-change when keys are dropped. Edit `DEFAULT_KEY_LIFETIME` directly if you
-need a different value for now.
+Peer keys default to a 60 second lifetime, configurable at construction
+or afterward:
+
+```python
+socket = UDPSocketClass(recv_port=11000, lifetime=120)
+...
+socket.update_lifetime(300)
+```
+
+`update_lifetime()` takes effect immediately: both the background key
+expiry check and the periodic re-announcement cadence (roughly
+`lifetime // 3`) are woken up and re-evaluated right away, rather than
+waiting out whatever interval was computed under the old lifetime.
 
 ### MTU Overhead Calculation
 
-The library automatically calculates effective MTU:
 ```
 Base MTU: 1500 (from interface)
 - IP Header: 20 bytes
 - UDP Header: 8 bytes
-- NaCl Box: 40 bytes (nonce + authenticator)
+- SealedBox: 48 bytes (32-byte ephemeral public key + 16-byte authenticator)
 - Msgpack: ~15 bytes (v2 structured format)
-- Replay Protection: 24 bytes (nonce + timestamp)
-= Effective MTU: ~1393 bytes
+= Effective MTU: ~1409 bytes
 ```
-
-### Replay Protection
-
-```python
-# In vault_udp_encryption.py
-MAX_MESSAGE_AGE_SECONDS = 60  # Reject messages older than 60s
-NONCE_CACHE_SIZE = 10000      # Max nonces tracked per peer
-```
-
-## Protocol Evolution
-
-### Version History
-
-**v2 (Current)**:
-- Structured msgpack format with version field
-- Separate payload and control channels
-- Improved extensibility for future features
-
-### Future Compatibility
-
-The protocol is designed for evolution:
-- New versions can add fields to the msgpack dict
-- Unknown fields are ignored by older implementations
-- Version mismatch is logged but doesn't break connections
-- Control channel can negotiate capabilities
-
-## Security Considerations
-
-### Threats Mitigated
-✅ **Man-in-the-Middle**: Authenticated encryption prevents tampering  
-✅ **Replay Attacks**: Nonce and timestamp validation  
-✅ **Impersonation**: Signature verification on key exchange  
-✅ **DoS**: Rate limiting per peer  
-✅ **Eavesdropping**: All data encrypted with NaCl  
-✅ **Protocol Downgrade**: Version checking prevents downgrade attacks
-
-### Threats Not Mitigated
-⚠️ **Initial Key Exchange (Trust-On-First-Use)**: The signature on a peer's first key-exchange message proves the message wasn't tampered with and that the sender controls the matching private key — it does *not* prove the sender is who you think they are. There's no external identity check, so a first-contact MITM can present its own, self-consistently signed keys (use TLS/certificates or an out-of-band fingerprint check if you need to verify peer identity)  
-⚠️ **Denial of Service**: UDP is inherently vulnerable to packet floods  
-⚠️ **Traffic Analysis**: Packet sizes are padded to MTU but timing is visible  
-
-### Best Practices
-
-1. **Use TLS for initial setup** if you need to verify peer identity
-2. **Limit key lifetime** to reduce impact of compromised keys
-3. **Monitor rate limits** and adjust based on your use case
-4. **Use firewall rules** to restrict allowed peers at network level
-5. **Regular updates** of PyNaCl and dependencies
-6. **Check protocol version** in get_stats() after connecting
-
-## Performance
-
-### Optimization Tips
-
-1. **Adjust compression level**: `pyzstd.compress(data, level=1)` for speed
-2. **Increase MTU** on local networks (jumbo frames)
-3. **Batch messages** when possible
-4. **Use multiple sockets** for parallel communication
-
-## Troubleshooting
-
-### "Message too large" error
-- Check your MTU: `socket.get_stats()['mtu']`
-- Reduce message size or split into chunks
-- Data is compressed automatically but some data doesn't compress well
-
-### Keys not exchanging
-- Check network connectivity
-- Verify firewall allows UDP on specified ports
-- Wait 2-3 seconds after `add_peer()` for initial exchange
-- Check logs: `logging.basicConfig(level=logging.DEBUG)`
-- Verify protocol version compatibility
-
-### Rate limit exceeded
-- Increase rate limit: `UDPSocketClass(rate_limit=200)`
-- Check for message loops
-- Verify peer isn't flooding
-
-### Replay attack warnings
-- Check system clocks are synchronized
-- Adjust `MAX_MESSAGE_AGE_SECONDS` if needed
-- Verify no message duplication in network
-
-### Protocol version mismatch
-- Check logs for version mismatch warnings
-- Packets with a different version number are dropped, not translated — there
-  is currently no cross-version compatibility, so all peers need to run the
-  same protocol version
 
 ## Testing
-
-The `tests/` directory has a pytest suite covering the crypto primitives,
-the encryption manager (including replay protection), the network utilities,
-and a real end-to-end encrypted UDP exchange between two sockets:
 
 ```bash
 pip install -e ".[dev]"
 pytest
 ```
 
-Each module also has a `main()` with a runnable demo (not an automated
-test) that you can use to explore the library interactively:
+The `tests/` directory covers the crypto primitives, peer key lifecycle,
+and a real end-to-end encrypted UDP exchange between two sockets.
+
+Each module also has a runnable `main()` demo (not an automated test):
 
 ```bash
-python vault_udp_socket.py        # Protocol v2 demo with multiple peers
+python vault_udp_socket.py
 python vault_udp_encryption.py
 python vault_udp_socket_helper.py
 python vault_ip.py
 ```
 
-## Examples
+## Troubleshooting
 
-See `main()` functions in each module for working examples.
+### "Message too large" error
+- Check `socket.get_stats()['mtu']`; reduce message size or split it up
+- Data is compressed automatically, but some data doesn't compress well
 
-### Simple Echo Server
+### Keys not exchanging
+- Check network connectivity and firewall rules for the UDP ports used
+- Wait briefly after `add_peer()` for the announcement round-trip
+- Enable debug logging: `logging.basicConfig(level=logging.DEBUG)`
 
-```python
-from vault_udp_socket import UDPSocketClass
-
-def echo_handler(data, addr):
-    print(f"Echo from {addr}: {data}")
-    socket.send_data(f"Echo: {data}", addr)
-
-with UDPSocketClass(11000) as socket:
-    socket.udp_recv_data.connect(echo_handler)
-    
-    print(f"Running protocol v{socket.get_stats()['protocol_version']}")
-    
-    # Keep running
-    import time
-    while True:
-        time.sleep(1)
-```
-
-### Version Check
-
-```python
-from vault_udp_socket import UDPSocketClass
-
-with UDPSocketClass(11000) as socket:
-    stats = socket.get_stats()
-    print(f"Protocol: v{stats['protocol_version']}")
-    print(f"MTU: {stats['mtu']} bytes")
-    print(f"Peers: {stats['peer_count']}")
-```
+### Rate limit exceeded
+- Increase it: `UDPSocketClass(rate_limit=200)`
+- Check for message loops or a flooding peer
 
 ## License
 
 - Copyright [2025] [ecki]
 - SPDX-License-Identifier: Apache-2.0
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## Changelog
-
-### Unreleased
-- 🐛 Fixed key-exchange signature verification: the signed payload was
-  never compared against the claimed keys, so any validly-signed message
-  was accepted regardless of its content
-- 🐛 Fixed encrypted traffic being silently dropped: the send socket was
-  unbound, so outgoing packets used a random ephemeral source port instead
-  of `recv_port`, which peers rely on to look up stored keys
-- 🐛 Fixed key-exchange replies being sent encrypted with a key the
-  recipient couldn't have yet (it was inside that very message); key
-  exchange is now always sent in plaintext, authenticated by its Ed25519
-  signature
-- 🔧 Migrated dependencies from `requirements.txt` into `pyproject.toml`
-  (`pip install -e .`)
-- 🔧 Replaced the unmaintained, untyped `PySignal` with `psygnal`
-- 🔥 Removed the dead top-level `__init__.py` (its relative imports could
-  never work in a directory whose name isn't a valid Python identifier)
-- ✅ Added a pytest suite covering crypto primitives, replay protection,
-  network utilities, and end-to-end encrypted UDP exchange
-
-### Version 0.2.0 (2025) - Protocol v2
-- ✨ Introduced protocol v2 with version field
-- ✨ Separated control and payload channels
-- ✨ Structured msgpack format for extensibility
-- 📝 Updated documentation for protocol v2
-
-### Version 0.1.0 (2024)
-- ✨ Added authenticated encryption with NaCl Box
-- ✨ Added replay attack prevention
-- ✨ Added signature verification for key exchange
-- ✨ Added rate limiting per peer
-- 🐛 Fixed MTU calculation to include all overheads
-- 🐛 Fixed memory leaks in nonce tracking
-- 🐛 Fixed race condition in port updates
-- 🔥 Removed password hashing (unused feature)
-- 📝 Completely rewrote documentation
-
-### Version 0.0.1 (2023)
-- Initial release with basic UDP + encryption
-
-## Support
-
-For issues and questions:
-- Documentation: This README
-
 ## Acknowledgments
 
 - [NaCl/libsodium](https://libsodium.gitbook.io/) for cryptography
 - [Zstandard](https://facebook.github.io/zstd/) for compression
 - [MessagePack](https://msgpack.org/) for efficient serialization
+- [psygnal](https://github.com/pyapp-kit/psygnal) for the signal/slot API

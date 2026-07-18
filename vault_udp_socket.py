@@ -4,8 +4,12 @@
 """
 Vault UDP Socket Module
 
-Provides bidirectional UDP communication with authenticated encryption,
-automatic key exchange, message compression, and rate limiting.
+Provides bidirectional UDP communication with anonymous SealedBox
+encryption, automatic key exchange, message compression, and rate limiting.
+
+Note: SealedBox encryption does not authenticate the sender, and this
+module does not track message nonces, so there is no replay protection.
+See vault_udp_encryption.py and vault_udp_socket_helper.py for details.
 
 Protocol Version 2:
 - Stricter separation of control and payload data
@@ -21,7 +25,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
-from typing import Optional, Tuple, List, Any, Dict
+from typing import Optional, Tuple, List, Any, Dict, Union
 
 import msgpack
 import psygnal
@@ -29,7 +33,6 @@ import pyzstd
 
 import vault_ip
 import vault_udp_encryption
-import vault_udp_socket_helper
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +47,8 @@ MAX_PORT = 65000
 # MTU calculation with proper overhead
 IP_HEADER_SIZE = 20  # IPv4 (IPv6 would be 40)
 UDP_HEADER_SIZE = 8
-NACL_BOX_OVERHEAD = 40  # Box overhead (24 nonce + 16 authenticator)
+SEALED_BOX_OVERHEAD = 48  # 32-byte ephemeral public key + 16-byte authenticator
 MSGPACK_OVERHEAD = 15  # Increased for structured format
-REPLAY_PROTECTION_OVERHEAD = 24  # 16 bytes nonce + 8 bytes timestamp
 
 DEFAULT_KEY_LIFETIME = 60
 KEY_MGMT_MIN_INTERVAL = 5
@@ -67,16 +69,6 @@ class MessageTooLargeError(UDPSocketError):
 
 class InvalidPortError(UDPSocketError):
     """Raised when port number is invalid."""
-    pass
-
-
-class RateLimitExceededError(UDPSocketError):
-    """Raised when rate limit is exceeded."""
-    pass
-
-
-class ProtocolVersionError(UDPSocketError):
-    """Raised when unsupported protocol version is encountered."""
     pass
 
 
@@ -138,7 +130,7 @@ class RateLimiter:
 
 class UDPSocketClass:
     """
-    Bidirectional UDP socket with authenticated encryption and rate limiting.
+    Bidirectional UDP socket with anonymous SealedBox encryption and rate limiting.
 
     Protocol v2 Features:
     - Versioned protocol for future compatibility
@@ -146,8 +138,9 @@ class UDPSocketClass:
     - Structured msgpack format with dedicated fields
 
     Security Features:
-    - Authenticated asymmetric encryption with replay protection
-    - Automatic key exchange with signature verification
+    - Anonymous asymmetric encryption (NaCl SealedBox) -- no sender
+      authentication and no replay protection, see module docstring
+    - Automatic key exchange
     - Message compression (zstd)
     - Rate limiting per peer
     - Thread-safe operations
@@ -166,7 +159,8 @@ class UDPSocketClass:
     def __init__(
             self,
             recv_port: int = DEFAULT_RECV_PORT,
-            rate_limit: int = DEFAULT_RATE_LIMIT
+            rate_limit: int = DEFAULT_RATE_LIMIT,
+            lifetime: int = DEFAULT_KEY_LIFETIME
     ):
         """
         Initialize UDP socket.
@@ -174,6 +168,8 @@ class UDPSocketClass:
         Args:
             recv_port: Port to listen on for incoming messages
             rate_limit: Maximum messages per second per peer
+            lifetime: How long peer keys are kept before they expire, in
+                seconds. Use update_lifetime() to change this later.
         """
         logger.info("Initializing UDPSocketClass v%d on port %d", PROTOCOL_VERSION, recv_port)
 
@@ -182,8 +178,8 @@ class UDPSocketClass:
 
         # Network configuration with proper MTU calculation
         base_mtu = vault_ip.get_min_mtu()
-        total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + NACL_BOX_OVERHEAD +
-                          MSGPACK_OVERHEAD + REPLAY_PROTECTION_OVERHEAD)
+        total_overhead = (IP_HEADER_SIZE + UDP_HEADER_SIZE + SEALED_BOX_OVERHEAD +
+                          MSGPACK_OVERHEAD)
         self.mtu = base_mtu - total_overhead
         logger.info("Base MTU: %d, Effective MTU: %d bytes", base_mtu, self.mtu)
 
@@ -200,10 +196,13 @@ class UDPSocketClass:
         # Sockets
         # A single socket is used for both sending and receiving, bound
         # synchronously here. This guarantees outgoing packets carry
-        # `recv_port` as their source port, which peers rely on to look up
-        # our keys after key exchange (see _handle_key_exchange) -- an
-        # unbound send socket would get a random ephemeral source port that
-        # never matches, silently breaking all encrypted traffic.
+        # `recv_port` as their source port, matching the port we announce
+        # in key exchange (see _send_public_keys/_handle_key_exchange) --
+        # an unbound send socket would get a random ephemeral source port
+        # instead, so peers would store our key under one address but our
+        # actual replies would keep arriving from another, and any message
+        # they send back to the address they know us by would go to a port
+        # nothing is listening on.
         bound_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         bound_socket.settimeout(1.0)
         try:
@@ -216,14 +215,17 @@ class UDPSocketClass:
         self._write_socket = bound_socket
 
         # Encryption
-        self.lifetime = DEFAULT_KEY_LIFETIME
+        self.lifetime = lifetime
         self._encryption = vault_udp_encryption.VaultAsymmetricEncryption(
             lifetime=self.lifetime
         )
 
-        # Threads
+        # Threads. A threading.Event (rather than a plain sleep) lets
+        # stop() and update_lifetime() wake the key management thread
+        # immediately instead of waiting out a stale interval.
         self._read_thread: Optional[threading.Thread] = None
         self._key_mgmt_thread: Optional[threading.Thread] = None
+        self._key_mgmt_wake_event = threading.Event()
 
         # Connect send signal
         self.udp_send_data.connect(self.send_data)
@@ -242,20 +244,70 @@ class UDPSocketClass:
         self.stop()
         return False
 
-    def add_peer(self, addr: Tuple[str, int]) -> None:
+    @property
+    def own_public_key(self) -> str:
+        """
+        Our full public encryption key.
+
+        Share this with a peer through some trusted out-of-band channel
+        so they can pass it as the third element to their add_peer() call
+        (see Pre-Sharing a Peer's Key in the README).
+        """
+        return self._encryption.enc_public_key
+
+    def get_peer_key(self, addr: Tuple[str, int]) -> Optional[str]:
+        """
+        Get the currently stored public key for a peer, if any.
+
+        Args:
+            addr: Tuple of (ip_address, port)
+
+        Returns:
+            The stored public key, or None if we don't have one yet
+        """
+        return self._encryption.get_peer_key(addr)
+
+    def get_all_peer_keys(self) -> Dict[Tuple[str, int], str]:
+        """
+        Get a snapshot of all currently known peer public keys.
+
+        Useful for persisting keys you've learned (e.g. to pre-seed
+        add_peer() on a future run) or comparing them against an
+        expected/pinned set.
+
+        Returns:
+            A copy of the address-to-key mapping
+        """
+        return self._encryption.get_all_peer_keys()
+
+    def add_peer(self, addr: Union[Tuple[str, int], Tuple[str, int, str]]) -> None:
         """
         Add a peer address to send messages to.
 
         Args:
-            addr: Tuple of (ip_address, port)
+            addr: Either (ip_address, port), or (ip_address, port, key) if
+                you already know the peer's public key through some other
+                (trusted) channel. Pre-seeding the key this way skips the
+                unauthenticated plaintext bootstrap message for this peer
+                entirely -- our very first announcement to them can be
+                encrypted right away instead.
         """
-        if not addr or len(addr) != 2:
+        if not addr or len(addr) not in (2, 3):
             logger.warning("Invalid address format: %s", addr)
             return
 
-        ip, port = addr
+        if len(addr) == 3:
+            ip, port, key = addr
+        else:
+            ip, port = addr
+            key = None
+
         validated_port = self._validate_port(port)
         validated_addr = (ip, validated_port)
+
+        if key:
+            self._encryption.update_peer_keys(validated_addr, key)
+            logger.info("Pre-seeded public key for %s from an out-of-band source", validated_addr)
 
         with self._lock:
             if validated_addr in self._peer_addresses:
@@ -319,6 +371,24 @@ class UDPSocketClass:
         with self._lock:
             return [addr for addr in self._peer_addresses if addr[0] == ip]
 
+    def update_lifetime(self, lifetime: int) -> None:
+        """
+        Change how long peer keys are kept before they expire.
+
+        Args:
+            lifetime: New key lifetime in seconds
+
+        Note:
+            This also changes how often we re-announce our key to peers
+            (roughly lifetime // 3). Both the encryption manager's expiry
+            check and the announcement cadence pick up the new value
+            immediately rather than waiting out their current interval.
+        """
+        self.lifetime = lifetime
+        self._encryption.set_key_lifetime(lifetime)
+        self._key_mgmt_wake_event.set()
+        logger.info("Key lifetime updated to %d seconds", lifetime)
+
     def update_recv_port(self, recv_port: int) -> None:
         """
         Update the listening port atomically.
@@ -359,7 +429,14 @@ class UDPSocketClass:
                 except Exception as e:
                     logger.debug("Error closing old socket: %s", e)
 
+            peers = self._peer_addresses.copy()
+
         logger.info("Receive port updated to %d", validated_port)
+
+        # Peers store our key under the port we last announced. Without
+        # re-announcing, they'd keep encrypting to the now-dead old port.
+        for addr in peers:
+            self._send_public_keys(addr)
 
     def send_data(self, data: Any, addr: Optional[Tuple[str, int]] = None) -> None:
         """
@@ -404,6 +481,7 @@ class UDPSocketClass:
         logger.info("Stopping UDPSocketClass")
 
         self._stop_flag = True
+        self._key_mgmt_wake_event.set()
 
         # Stop encryption manager
         self._encryption.stop(timeout=timeout)
@@ -455,9 +533,7 @@ class UDPSocketClass:
                 'peers_by_ip': peers_by_ip,
                 'encryption_stats': self._encryption.get_stats(),
                 'enc_public_key': self._encryption.enc_public_key[:32] + "..."
-                if self._encryption.enc_public_key else None,
-                'sign_public_key': self._encryption.sign_public_key[:32] + "..."
-                if self._encryption.sign_public_key else None
+                if self._encryption.enc_public_key else None
             }
 
     # Private methods
@@ -497,8 +573,14 @@ class UDPSocketClass:
             except OSError as e:
                 if self._stop_flag:
                     break
-                logger.debug("Socket error (likely during shutdown): %s", e)
-                break
+                # update_recv_port() closes the old socket out from under a
+                # blocked recvfrom() on it, which surfaces here as an
+                # OSError even though nothing is actually wrong -- retry and
+                # pick up the (already-swapped) current socket instead of
+                # treating this as fatal.
+                logger.debug("Socket error (possibly a port change): %s", e)
+                time.sleep(0.05)
+                continue
             except Exception as e:
                 if self._stop_flag:
                     break
@@ -517,17 +599,14 @@ class UDPSocketClass:
             logger.warning("Rate limit exceeded for %s, dropping packet", addr)
             return
 
-        # Try to decrypt (with replay protection)
-        try:
-            decrypted_data = self._encryption.decrypt_if_possible(packet, addr)
-        except Exception as e:
-            logger.warning("Decryption error from %s: %s", addr, e)
-            return
+        # Try to decrypt; falls back to the raw packet if it isn't ours to
+        # decrypt (e.g. an unencrypted key-exchange message), never raises.
+        decrypted_data = self._encryption.decrypt_if_possible(packet)
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received %d bytes from %s", len(decrypted_data), addr)
 
-        # Unpack msgpack - handle both v1 (list) and v2 (dict) formats
+        # Unpack msgpack (protocol v2 dict format)
         try:
             unpacked_data = msgpack.unpackb(decrypted_data)
 
@@ -581,7 +660,7 @@ class UDPSocketClass:
             # Control data is JSON
             msg_dict = json.loads(control_data.decode("utf-8"))
 
-            if "enc_key" in msg_dict and "sign_key" in msg_dict:
+            if "enc_key" in msg_dict:
                 self._handle_key_exchange(msg_dict, addr)
             else:
                 logger.warning("Unknown control message from %s", addr)
@@ -618,17 +697,20 @@ class UDPSocketClass:
 
     def _handle_key_exchange(self, msg_dict: dict, addr: Tuple[str, int]) -> None:
         """
-        Handle incoming public key exchange with signature verification.
+        Handle an incoming public key announcement.
+
+        Note: this is not authenticated -- anyone can claim any address and
+        announce a key for it. There is no verification of who actually
+        sent this message, only that it is well-formed.
 
         Args:
-            msg_dict: Message dictionary containing 'enc_key' and 'sign_key'
+            msg_dict: Message dictionary containing 'enc_key'
             addr: Sender address
         """
         enc_key = msg_dict.get("enc_key")
-        sign_key = msg_dict.get("sign_key")
 
-        if not enc_key or not sign_key:
-            logger.warning("Key exchange message without keys from %s", addr)
+        if not enc_key:
+            logger.warning("Key exchange message without a key from %s", addr)
             return
 
         # Update address if port is specified
@@ -637,38 +719,31 @@ class UDPSocketClass:
             if isinstance(port, int):
                 addr = (addr[0], port)
 
-        # Verify signature if present
-        signature = msg_dict.get("signature")
-        if signature:
-            try:
-                # The signature should be over enc_key + sign_key
-                signed_data = (enc_key + sign_key).encode('utf-8')
-                sig_bytes = vault_udp_socket_helper.b64_str_to_bytes(signature)
-
-                # Verify using the sign_key from the message
-                verified_data = vault_udp_socket_helper.verify_signature(sign_key, sig_bytes)
-                if verified_data != signed_data:
-                    logger.warning("Signature content mismatch from %s, rejecting keys", addr)
-                    return
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("Signature verified for %s", addr)
-            except vault_udp_socket_helper.SignatureError:
-                logger.warning("Invalid signature from %s, rejecting keys", addr)
-                return
-
         # Check if this is a new key
-        key_exists = self._encryption.peer_keys_exist(addr)
+        previous_key = self._encryption.get_peer_key(addr)
 
-        if not key_exists:
-            logger.info("Received new public keys from %s", addr)
-            self._encryption.update_peer_keys(addr, enc_key, sign_key)
-            # Send our keys in response
+        if previous_key is None:
+            logger.info("Received new public key from %s", addr)
+            self._encryption.update_peer_keys(addr, enc_key)
+            # Send our key in response
             self._send_public_keys(addr)
+        elif previous_key != enc_key:
+            # Not authenticated (see class docstring), so this could be a
+            # legitimate key rotation just as easily as someone else now
+            # sending from this address with a different key. We can't
+            # tell the difference, but we can at least make it visible
+            # instead of silently overwriting a key we'd already trusted.
+            logger.warning(
+                "Public key for %s changed since last seen -- accepting it "
+                "anyway (no authentication to verify against)", addr
+            )
+            self._encryption.update_peer_keys(addr, enc_key)
         else:
-            # Update existing keys (refresh timestamp)
-            self._encryption.update_peer_keys(addr, enc_key, sign_key)
+            # Same key seen again (e.g. a periodic re-announcement) --
+            # refresh its expiry timestamp.
+            self._encryption.update_peer_keys(addr, enc_key)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Updated public keys for %s", addr)
+                logger.debug("Refreshed public key for %s", addr)
 
     def _key_management_loop(self) -> None:
         """Background loop for periodic key exchange and cleanup."""
@@ -692,64 +767,51 @@ class UDPSocketClass:
             except Exception as e:
                 logger.error("Error in key management loop: %s", e, exc_info=True)
 
-            # Random sleep to avoid synchronization
+            # Randomized wait to avoid synchronization; interruptible so
+            # stop() / update_lifetime() can wake us immediately instead of
+            # waiting out a stale interval.
             sleep_duration = random.randint(
                 KEY_MGMT_MIN_INTERVAL,
                 max(KEY_MGMT_MIN_INTERVAL, self.lifetime // 3)
             )
-            time.sleep(sleep_duration)
+            self._key_mgmt_wake_event.wait(timeout=sleep_duration)
+            self._key_mgmt_wake_event.clear()
 
         logger.debug("Key management thread stopped")
 
     def _send_public_keys(self, addr: Tuple[str, int]) -> None:
         """
-        Send our public keys to a peer with signature via control channel.
+        Send our public key to a peer via the control channel.
 
         Args:
             addr: Target address
         """
-        # Create signature over our keys
-        keys_data = (self._encryption.enc_public_key +
-                     self._encryption.sign_public_key).encode('utf-8')
-
-        try:
-            if self._encryption._sign_private_key is None:
-                raise ValueError("Signing private key not initialized")
-            signed_data = vault_udp_socket_helper.sign_message(
-                self._encryption._sign_private_key,
-                keys_data
-            )
-            signature = vault_udp_socket_helper.bytes_to_b64_str(signed_data)
-        except Exception as e:
-            logger.error("Failed to sign keys: %s", e)
-            signature = None
-
         key_data = {
             "enc_key": self._encryption.enc_public_key,
-            "sign_key": self._encryption.sign_public_key,
-            "signature": signature,
             "port": self.recv_port
         }
 
         try:
-            # Send via control channel (payload is empty). Key exchange
-            # messages are always sent in plaintext: their authenticity comes
-            # from the Ed25519 signature above, not from Box encryption. They
-            # can't be encrypted anyway -- the recipient doesn't have our
-            # public key to decrypt with until this very message delivers it.
+            # Sent via the control channel like any other message: opportunistically
+            # encrypted if we already have the peer's key, plaintext otherwise. Unlike
+            # with Box, there's no reason to force plaintext here -- SealedBox
+            # decryption only needs the recipient's own private key, so encrypting a
+            # key announcement is safe the moment we know the peer's key. The very
+            # first announcement to a never-before-seen peer still goes out in the
+            # clear, simply because encrypt_if_possible() has no key to encrypt with
+            # yet. The key itself needs no confidentiality either way.
             json_data = json.dumps(key_data).encode("utf-8")
-            self._send_internal(b'', json_data, addr, force_plaintext=True)
+            self._send_internal(b'', json_data, addr)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug("Sent public keys to %s", addr)
+                logger.debug("Sent public key to %s", addr)
         except Exception as e:
-            logger.error("Failed to send public keys to %s: %s", addr, e)
+            logger.error("Failed to send public key to %s: %s", addr, e)
 
     def _send_internal(
             self,
             payload: bytes,
             control: bytes,
-            addr: Optional[Tuple[str, int]] = None,
-            force_plaintext: bool = False
+            addr: Optional[Tuple[str, int]] = None
     ) -> None:
         """
         Internal send method with encryption and padding (protocol v2).
@@ -758,7 +820,6 @@ class UDPSocketClass:
             payload: Compressed user data (or empty for control-only)
             control: Control data like key exchange (or empty for payload-only)
             addr: Target address, or None for all peers
-            force_plaintext: If True, never encrypt (used for key exchange)
 
         Raises:
             MessageTooLargeError: If message exceeds MTU
@@ -800,11 +861,8 @@ class UDPSocketClass:
         # Send to each peer
         for target_addr in target_addrs:
             try:
-                # Try to encrypt (with authentication and replay protection)
-                encrypted = (
-                    packed_data if force_plaintext
-                    else self._encryption.encrypt_if_possible(packed_data, target_addr)
-                )
+                # Try to encrypt (SealedBox, if we have the peer's key)
+                encrypted = self._encryption.encrypt_if_possible(packed_data, target_addr)
 
                 # Send
                 self._write_socket.sendto(encrypted, target_addr)

@@ -145,6 +145,74 @@ def test_add_peer_ignores_malformed_address(make_socket):
     assert sock.get_peers() == []
 
 
+def test_add_peer_with_key_updates_existing_peer_without_duplicating(make_socket):
+    sock = make_socket()
+    peer_addr = ("127.0.0.1", _free_udp_port())
+
+    sock.add_peer(peer_addr)
+    assert sock.get_peer_key(peer_addr) is None
+
+    sock.add_peer((peer_addr[0], peer_addr[1], "out-of-band-key"))
+
+    assert sock.get_peer_key(peer_addr) == "out-of-band-key"
+    assert sock.get_peers().count(peer_addr) == 1
+
+
+def test_add_peer_with_preseeded_key_stores_it_immediately(make_socket):
+    sock = make_socket()
+    peer_addr = ("127.0.0.1", _free_udp_port())
+    fake_key = "some-base64-key"
+
+    sock.add_peer((peer_addr[0], peer_addr[1], fake_key))
+
+    assert sock.has_peer(peer_addr) is True
+    assert sock.get_peer_key(peer_addr) == fake_key
+
+
+def test_add_peer_with_preseeded_key_sends_first_announcement_encrypted(make_socket, caplog):
+    """A key learned out-of-band should let even the very first
+    announcement go out encrypted, skipping the plaintext bootstrap."""
+    sock_a = make_socket()
+    sock_b = make_socket()
+    addr_b = ("127.0.0.1", sock_b.recv_port)
+
+    with caplog.at_level("DEBUG", logger="vault_udp_encryption"):
+        sock_a.add_peer((addr_b[0], addr_b[1], sock_b.own_public_key))
+
+    assert not any(
+        "sending unencrypted" in record.message for record in caplog.records
+    ), "first announcement should have been encrypted since the peer's key was pre-seeded"
+
+
+def test_own_public_key_matches_full_key(make_socket):
+    sock = make_socket()
+    assert sock.own_public_key == sock._encryption.enc_public_key
+    assert sock.own_public_key  # non-empty
+    # get_stats() only exposes a truncated version for display purposes.
+    assert len(sock.own_public_key) > len(sock.get_stats()["enc_public_key"])
+
+
+def test_get_peer_key_returns_none_when_unknown(make_socket):
+    sock = make_socket()
+    assert sock.get_peer_key(("127.0.0.1", _free_udp_port())) is None
+
+
+def test_get_all_peer_keys_reflects_known_peers(make_socket):
+    sock = make_socket()
+    addr_1 = ("127.0.0.1", _free_udp_port())
+    addr_2 = ("127.0.0.1", _free_udp_port())
+
+    sock.add_peer((addr_1[0], addr_1[1], "key-one"))
+    sock.add_peer((addr_2[0], addr_2[1], "key-two"))
+
+    all_keys = sock.get_all_peer_keys()
+
+    assert all_keys == {addr_1: "key-one", addr_2: "key-two"}
+    # Must be a snapshot, not a live view.
+    all_keys[addr_1] = "tampered"
+    assert sock.get_peer_key(addr_1) == "key-one"
+
+
 def test_get_peers_by_ip_filters_correctly(make_socket):
     sock = make_socket()
     sock.add_peer(("127.0.0.1", _free_udp_port()))
@@ -211,3 +279,84 @@ def test_two_sockets_exchange_keys_and_deliver_message(make_socket):
 
     assert _wait_until(lambda: len(received) > 0), "message was not received in time"
     assert received == ["hello world"]
+
+
+def test_update_recv_port_reannounces_to_known_peers(make_socket):
+    sock_a = make_socket()
+    sock_b = make_socket()
+
+    assert _wait_until(
+        lambda: sock_a._read_socket is not None and sock_b._read_socket is not None
+    ), "read sockets did not finish binding in time"
+
+    received = []
+    sock_a.udp_recv_data.connect(lambda data, addr: received.append(data))
+
+    addr_b = ("127.0.0.1", sock_b.recv_port)
+    sock_a.add_peer(addr_b)
+
+    assert _wait_until(
+        lambda: sock_a._encryption.peer_keys_exist(addr_b)
+        and sock_b._encryption.peer_keys_exist(("127.0.0.1", sock_a.recv_port))
+    ), "initial key exchange did not complete in time"
+
+    new_addr_a = ("127.0.0.1", _free_udp_port())
+    sock_a.update_recv_port(new_addr_a[1])
+
+    assert _wait_until(
+        lambda: sock_b._encryption.peer_keys_exist(new_addr_a)
+    ), "peer was not re-announced to after the port change"
+
+    sock_b.send_data("hello after port change", new_addr_a)
+
+    assert _wait_until(lambda: len(received) > 0), "message was not received on the new port"
+    assert received == ["hello after port change"]
+
+
+def test_lifetime_constructor_param_is_used(make_socket):
+    sock = make_socket(lifetime=15)
+    assert sock.lifetime == 15
+    assert sock.get_stats()["encryption_stats"]["key_lifetime_seconds"] == 15
+
+
+def test_update_lifetime_propagates_to_encryption_manager(make_socket):
+    sock = make_socket(lifetime=60)
+    sock.update_lifetime(15)
+    assert sock.lifetime == 15
+    assert sock.get_stats()["encryption_stats"]["key_lifetime_seconds"] == 15
+
+
+def test_key_change_for_known_peer_logs_warning(make_socket, caplog):
+    sock = make_socket()
+    addr = ("127.0.0.1", _free_udp_port())
+    sock._encryption.update_peer_keys(addr, "old-key")
+
+    with caplog.at_level("WARNING", logger="vault_udp_socket"):
+        sock._handle_key_exchange({"enc_key": "new-key"}, addr)
+
+    assert sock.get_peer_key(addr) == "new-key"
+    assert any("changed since last seen" in record.message for record in caplog.records)
+
+
+def test_same_key_reannounced_does_not_log_warning(make_socket, caplog):
+    sock = make_socket()
+    addr = ("127.0.0.1", _free_udp_port())
+    sock._encryption.update_peer_keys(addr, "same-key")
+
+    with caplog.at_level("WARNING", logger="vault_udp_socket"):
+        sock._handle_key_exchange({"enc_key": "same-key"}, addr)
+
+    assert not any("changed since last seen" in record.message for record in caplog.records)
+
+
+def test_stop_returns_promptly_even_with_a_long_lifetime(make_socket):
+    """stop() must not have to wait out the key management thread's sleep
+    interval, which can be tens of seconds for a long key lifetime."""
+    sock = make_socket(lifetime=600)
+
+    start = time.time()
+    sock.stop(timeout=5.0)
+    elapsed = time.time() - start
+
+    assert elapsed < 2.0
+    assert sock._key_mgmt_thread.is_alive() is False
